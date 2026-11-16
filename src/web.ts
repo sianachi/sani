@@ -34,6 +34,9 @@ export interface WebApp {
     auth: 'bearer' | 'oauth';
     token: string;
     issuer: string;
+    clientId: string;
+    clientSecret: string;
+    scope: string;
   }): Promise<{ id: string; authorizationUrl?: string }>;
   refreshConnection(id: string): Promise<void>;
   enableTool(id: string, tool: string, enabled: boolean): void;
@@ -223,7 +226,8 @@ ${connection.auth === 'bearer' ? credentialAction : ''}
 ${toolRows || '<p><small>No tools discovered yet.</small></p>'}</article>`;
 }
 
-function addConnectionForm(): string {
+function addConnectionForm(publicOrigin: string): string {
+  const callback = new URL('/oauth/callback', publicOrigin).href;
   return `<form class="panel" method="post" action="/connections">
 <h3>Add connection</h3>
 <label>Connection name<input name="name" maxlength="80" required></label>
@@ -231,6 +235,13 @@ function addConnectionForm(): string {
 <label>Authentication<select name="auth"><option value="bearer">Bearer token</option><option value="oauth">Browser sign-in (OAuth)</option></select></label>
 <label>Bearer token <small>For token authentication</small><input type="password" name="token" autocomplete="off" maxlength="8192"></label>
 <label>OAuth issuer URL <small>For browser sign-in</small><input name="issuer" type="url" maxlength="2048"></label>
+<details class="stack"><summary>Optional OAuth settings</summary>
+<p class="hint">If your provider asks you to register an app, use this callback URL in its settings.</p>
+<pre><code>${esc(callback)}</code></pre>
+<label>Client ID <small>From your registered app</small><input name="clientId" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="512"></label>
+<label>Client secret <small>Enter it if your registered app has one.</small><input type="password" name="clientSecret" autocomplete="off" maxlength="8192"></label>
+<label>OAuth scopes <small>Enter any scopes required by your provider.</small><input name="scope" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="2048"></label>
+</details>
 <button class="primary">Add connection</button></form>`;
 }
 
@@ -259,7 +270,7 @@ function dashboard(res: ServerResponse, app: WebApp) {
 
   render(res, 200, 'Operator console', `<h1>Operator console</h1>
 <div class="grid"><div><section id="connections" class="stack"><h2>Connections</h2>
-${connectionRows}${addConnectionForm()}</section></div>
+${connectionRows}${addConnectionForm(app.publicOrigin)}</section></div>
 <div><section id="requests"><h2>Requests</h2><div class="panel">${requestRows || '<p>Requests from your agents appear here.</p>'}</div></section>
 <section id="agents"><h2>Agents</h2><div class="panel">${agentRows}
 <form method="post" action="/agents"><label>Agent name<input name="name" maxlength="80" required></label>
@@ -388,12 +399,18 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
       if (path === '/connections') {
         const auth = field(fields, 'auth', 10);
         if (auth !== 'bearer' && auth !== 'oauth') throw invalidForm;
+        const clientId = auth === 'oauth' ? field(fields, 'clientId', 512, false) : '';
+        const clientSecret = auth === 'oauth' ? field(fields, 'clientSecret', 8192, false) : '';
+        if (clientSecret && !clientId.trim()) throw invalidForm;
         const created = await app.createConnection({
           name: field(fields, 'name', 80),
           url: field(fields, 'url', 2048),
           auth,
           token: field(fields, 'token', 8192, auth === 'bearer'),
           issuer: field(fields, 'issuer', 2048, auth === 'oauth'),
+          clientId,
+          clientSecret,
+          scope: auth === 'oauth' ? field(fields, 'scope', 2048, false) : '',
         });
         if (created.authorizationUrl) providerSignIn(res, app, created.authorizationUrl);
         else redirect(res, '/#connections');

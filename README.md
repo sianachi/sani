@@ -54,7 +54,9 @@ docker run --name sani --init --env-file .env \
 1. Add a named connection to the platform's Streamable HTTP MCP endpoint.
    Give Sani a restricted bearer token or choose OAuth and enter the
    platform's trusted issuer. For OAuth, complete the provider sign-in in
-   your browser. Sani pins discovery to that issuer.
+   your browser. Sani pins discovery to that issuer. For a pre-registered
+   OAuth client, enter its client ID and secret in **OAuth settings**, and
+   use the callback URL shown there when registering the app.
 2. Refresh the tool list as needed and enable the exact tools you want.
    Sani disables a changed tool after refresh so you can review it.
 3. Create an agent access key for each client. Sani shows it once. Put it in
@@ -63,9 +65,12 @@ docker run --name sani --init --env-file .env \
 
 Suggested first connections:
 
-- **GitHub.** Use the official [GitHub MCP server](https://github.com/github/github-mcp-server)
-  at `https://api.githubcopilot.com/mcp/` and a repository-scoped token.
-  Enable a pull-request read tool and check a pull request in your test repository.
+- **GitHub.** Use `https://api.githubcopilot.com/mcp/x/pull_requests/readonly`
+  and a [GitHub App registered for OAuth](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).
+  Give the app **Pull requests: Read-only** permission and install it on
+  the test repository. Choose OAuth, enter `https://github.com/login/oauth`
+  as the issuer, and supply the app's client ID, client secret, and
+  `offline_access` scope. A repository-scoped bearer token is also supported.
 - **Linear.** Use the [read-only Linear MCP server](https://linear.app/docs/mcp)
   at `https://mcp.linear.app/mcp/readonly`. Choose OAuth and enter
   `https://mcp.linear.app` as the issuer. Enable an issue lookup and read a test issue.

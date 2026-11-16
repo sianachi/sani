@@ -196,9 +196,26 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
     async createConnection(input) {
       const name = displayName(input.name);
       const url = normalizeRemoteUrl(input.url, options.allowInsecureLoopback);
-      const auth: Auth = input.auth === 'bearer'
-        ? { kind: 'bearer', token: token(input.token) }
-        : { kind: 'oauth', issuer: normalizeRemoteUrl(input.issuer, options.allowInsecureLoopback), state: {} };
+      let auth: Auth;
+      if (input.auth === 'bearer') {
+        auth = { kind: 'bearer', token: token(input.token) };
+      } else {
+        const issuer = normalizeRemoteUrl(input.issuer, options.allowInsecureLoopback);
+        const clientId = input.clientId.trim();
+        const clientSecret = input.clientSecret;
+        const scope = input.scope.trim();
+        if ((clientId && !/^[\x21-\x7e]+$/.test(clientId)) ||
+          (clientSecret && (!clientId || !/^[\x21-\x7e]+$/.test(clientSecret))) ||
+          (scope && !/^[\x21\x23-\x5b\x5d-\x7e]+(?: [\x21\x23-\x5b\x5d-\x7e]+)*$/.test(scope))) {
+          throw new Error('Check the OAuth client registration and scope.');
+        }
+        auth = {
+          kind: 'oauth', issuer, ...(scope && { scope }),
+          state: clientId ? {
+            clientInformation: { issuer, client_id: clientId, ...(clientSecret && { client_secret: clientSecret }) },
+          } : {},
+        };
+      }
       assertScreened({ name, url }, credentials(auth));
       const id = store.createConnection(name, url, auth);
       if (auth.kind === 'oauth') return { id, authorizationUrl: await startOAuth(id) };

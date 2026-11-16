@@ -259,10 +259,15 @@ function json(response: ServerResponse, body: unknown): void {
   response.end(JSON.stringify(body));
 }
 
-test('OAuth connections require a single-use state and validate draft 2020-12 arguments', { timeout: 30_000 }, async (context) => {
+async function verifyOAuthConnection(
+  context: TestContext,
+  registered?: { clientId: string; clientSecret: string; scope: string },
+) {
   const { web, cookie, form, directory, addAgent } = await openConsole(context);
   const oauthToken = 'fixture-oauth-access-token-AbC0987654321';
   const code = 'fixture-oauth-code';
+  const clientId = registered?.clientId ?? 'sani-fixture-client';
+  let registrations = 0;
   let exchanges = 0;
   let resource = '';
   let issuer = '';
@@ -278,15 +283,18 @@ test('OAuth connections require a single-use state and validate draft 2020-12 ar
           issuer,
           authorization_endpoint: new URL('/authorize', issuer).href,
           token_endpoint: new URL('/token', issuer).href,
-          registration_endpoint: new URL('/register', issuer).href,
+          ...(registered
+            ? { token_endpoint_auth_methods_supported: ['client_secret_post'] }
+            : { registration_endpoint: new URL('/register', issuer).href }),
           response_types_supported: ['code'],
           code_challenge_methods_supported: ['S256'],
         });
       }
       if (path === '/register' && request.method === 'POST') {
         await readBody(request);
+        registrations += 1;
         return json(response, {
-          client_id: 'sani-fixture-client',
+          client_id: clientId,
           redirect_uris: [new URL('/oauth/callback', web).href],
           token_endpoint_auth_method: 'none',
         });
@@ -294,7 +302,8 @@ test('OAuth connections require a single-use state and validate draft 2020-12 ar
       if (path === '/token' && request.method === 'POST') {
         const params = new URLSearchParams(await readBody(request));
         const verifier = params.get('code_verifier') ?? '';
-        if (params.get('code') !== code || createHash('sha256').update(verifier).digest('base64url') !== challenge) {
+        if (params.get('client_id') !== clientId || params.get('client_secret') !== (registered?.clientSecret ?? null)
+          || params.get('code') !== code || createHash('sha256').update(verifier).digest('base64url') !== challenge) {
           response.writeHead(400).end();
           return;
         }
@@ -345,13 +354,19 @@ test('OAuth connections require a single-use state and validate draft 2020-12 ar
   issuer = new URL('/', oauthServer).href;
   resource = new URL('/mcp', oauthServer).href;
 
-  const started = await form('/connections', { name: 'oauth-widgets', url: resource, auth: 'oauth', issuer, token: '' });
+  const started = await form('/connections', {
+    name: 'oauth-widgets', url: resource, auth: 'oauth', issuer, token: '', ...registered,
+  });
   assert.equal(started.status, 200);
   const page = await started.text();
+  if (registered) assert.equal(page.includes(registered.clientSecret), false);
   const link = page.match(/href="([^"]+)">Continue to provider<\/a>/)?.[1];
   assert(link);
   const consent = new URL(link.replaceAll('&amp;', '&'));
   assert.equal(consent.href.startsWith(new URL('/authorize', issuer).href + '?'), true);
+  assert.equal(consent.searchParams.get('client_id'), clientId);
+  if (registered) assert.equal(consent.searchParams.get('scope'), registered.scope);
+  assert.equal(registrations, registered ? 0 : 1);
   challenge = consent.searchParams.get('code_challenge') ?? '';
   assert.match(challenge, /^[a-zA-Z0-9_-]{43}$/);
   const callbackState = consent.searchParams.get('state');
@@ -378,6 +393,7 @@ test('OAuth connections require a single-use state and validate draft 2020-12 ar
   const connected = await dashboard.text();
   assert.match(connected, /inspect_oauth_resource/);
   assert.equal(connected.includes(oauthToken), false);
+  if (registered) assert.equal(connected.includes(registered.clientSecret), false);
 
   const connectionPath = connected.match(/\/connections\/[^/"\s]+\/tools/)?.[0];
   assert(connectionPath);
@@ -401,4 +417,15 @@ test('OAuth connections require a single-use state and validate draft 2020-12 ar
     (await readdir(directory)).map(name => readFile(join(directory, name))),
   ));
   assert.equal(persisted.includes(oauthToken), false);
-});
+  if (registered) assert.equal(persisted.includes(registered.clientSecret), false);
+}
+
+test('dynamic OAuth requires single-use state and validates draft 2020-12 arguments',
+  { timeout: 30_000 }, context => verifyOAuthConnection(context));
+
+test('pre-registered OAuth uses saved client credentials without dynamic registration',
+  { timeout: 30_000 }, context => verifyOAuthConnection(context, {
+    clientId: 'fixture-existing-client',
+    clientSecret: 'fixture-existing-client-secret-123456',
+    scope: 'offline_access',
+  }));

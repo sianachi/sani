@@ -34,6 +34,7 @@ const timeout = 15_000;
 const maxResponseBytes = 1_048_576;
 const maxTools = 512;
 const globalIPv6 = ipaddr.IPv6.parse('2000::');
+const githubOAuthIssuer = 'https://github.com/login/oauth';
 
 class RemoteError extends Error {}
 
@@ -170,6 +171,17 @@ export class Remote {
       clientInformation: () => {
         const credentials = this.#oauth.clientInformation;
         if (credentials) this.#checkIssuer(credentials.issuer);
+        if (this.#issuer?.href === githubOAuthIssuer) {
+          if (!credentials?.client_id || !credentials.client_secret) {
+            throw new RemoteError('Enter the client ID and secret for a registered GitHub App.');
+          }
+          // GitHub documents form authentication and omits the metadata hint the SDK needs.
+          return {
+            ...credentials,
+            redirect_uris: [this.#options.callbackUrl],
+            token_endpoint_auth_method: 'client_secret_post',
+          };
+        }
         return credentials;
       },
       saveClientInformation: (clientInformation) => {

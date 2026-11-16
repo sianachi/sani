@@ -218,3 +218,117 @@ test('OAuth registers, binds PKCE, refreshes on discovery and spends each tool d
   assert.equal(redirectedRequests, 0);
   assert.deepEqual(failures, []);
 });
+
+test('registered GitHub App uses PKCE and sends client credentials only in the issuer token form', async (t) => {
+  const resource = 'https://api.githubcopilot.com/mcp/x/pull_requests/readonly';
+  const issuer = 'https://github.com/login/oauth';
+  const callback = 'http://127.0.0.1:8765/oauth/callback';
+  const clientId = 'test-github-app-id';
+  const clientSecret = 'test-github-app-secret';
+  let challenge: string | null;
+  let formResponse = true;
+  let exchanges = 0;
+  let refreshes = 0;
+  let activeToken = 'test-user-access';
+  let expired = false;
+  let persisted: OAuthState = { clientInformation: { client_id: clientId, client_secret: clientSecret, issuer } };
+
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const headers = new Headers(init?.headers);
+    if (url === issuer + '/access_token') {
+      assert.equal(init?.method, 'POST');
+      assert.equal(headers.get('Accept'), 'application/json');
+      assert.equal(headers.get('Authorization'), null);
+      const form = init?.body;
+      assert.ok(form instanceof URLSearchParams);
+      assert.equal(form.get('client_id'), clientId);
+      assert.equal(form.get('client_secret'), clientSecret);
+      assert.equal(form.get('resource'), resource);
+      if (form.get('grant_type') === 'authorization_code') {
+        exchanges += 1;
+        assert.equal(form.get('redirect_uri'), callback);
+        assert.equal(form.get('code'), 'test-github-code');
+        const verifier = form.get('code_verifier');
+        assert.ok(verifier);
+        assert.equal(createHash('sha256').update(verifier).digest('base64url'), challenge);
+        if (formResponse) {
+          return new Response('access_token=unexpected-form-token&token_type=bearer', {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          });
+        }
+      } else {
+        refreshes += 1;
+        expired = false;
+        activeToken = 'test-replacement-access';
+        assert.equal(form.get('grant_type'), 'refresh_token');
+        assert.equal(form.get('refresh_token'), 'test-github-refresh');
+      }
+      return Response.json({ access_token: activeToken, refresh_token: 'test-github-refresh', token_type: 'bearer' });
+    }
+
+    assert.ok(!url.includes(clientId) && !url.includes(clientSecret));
+    assert.ok(!JSON.stringify([...headers]).includes(clientSecret));
+    assert.ok(!String(init?.body).includes(clientId) && !String(init?.body).includes(clientSecret));
+    if (url === 'https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/x/pull_requests/readonly') {
+      assert.equal(headers.get('Authorization'), null);
+      return Response.json({ resource, authorization_servers: [issuer], scopes_supported: ['repo', 'write:packages'] });
+    }
+    if (url === 'https://github.com/.well-known/oauth-authorization-server/login/oauth') {
+      assert.equal(headers.get('Authorization'), null);
+      return Response.json({
+        issuer,
+        authorization_endpoint: issuer + '/authorize',
+        token_endpoint: issuer + '/access_token',
+        response_types_supported: ['code'],
+        code_challenge_methods_supported: ['S256'],
+        scopes_supported: ['offline_access'],
+      });
+    }
+    assert.equal(url, resource);
+    if (expired) return new Response(null, { status: 401 });
+    assert.equal(headers.get('Authorization'), `Bearer ${activeToken}`);
+    assert.equal(typeof init?.body, 'string');
+    const request = z.object({ method: z.string(), id: z.number().optional() }).parse(JSON.parse(String(init?.body)));
+    if (request.method === 'notifications/initialized') return new Response(null, { status: 202 });
+    if (request.method === 'initialize') return Response.json({
+      jsonrpc: '2.0', id: request.id, result: {
+        protocolVersion: '2025-11-25', capabilities: { tools: {} },
+        serverInfo: { name: 'GitHub fixture', version: '1' },
+      },
+    });
+    assert.equal(request.method, 'tools/list');
+    return Response.json({
+      jsonrpc: '2.0', id: request.id,
+      result: { tools: [{ name: 'pull_request_read', inputSchema: { type: 'object' } }] },
+    });
+  });
+
+  const connect = () => new Remote({
+    url: resource,
+    auth: { kind: 'oauth', issuer, state: persisted, scope: 'offline_access' },
+    callbackUrl: callback,
+    saveOAuth: (state) => { persisted = state; },
+  });
+
+  const first = new URL(await connect().startOAuth('first-state'));
+  challenge = first.searchParams.get('code_challenge');
+  assert.equal(first.searchParams.get('client_id'), clientId);
+  assert.equal(first.searchParams.get('scope'), 'offline_access');
+  assert.equal(first.searchParams.get('resource'), resource);
+  assert.ok(!first.href.includes(clientSecret));
+  await assert.rejects(connect().finishOAuth('test-github-code'), /Could not complete authorization/);
+  assert.ok(!Object.hasOwn(persisted, 'tokens'));
+
+  formResponse = false;
+  challenge = new URL(await connect().startOAuth('second-state')).searchParams.get('code_challenge');
+  await connect().finishOAuth('test-github-code');
+  assert.equal(exchanges, 2);
+  assert.equal(persisted.tokens?.access_token, activeToken);
+  assert.equal(persisted.tokens?.issuer, issuer);
+
+  expired = true;
+  assert.equal((await connect().discover())[0]?.name, 'pull_request_read');
+  assert.equal(refreshes, 1);
+  assert.equal(persisted.tokens?.access_token, activeToken);
+});
