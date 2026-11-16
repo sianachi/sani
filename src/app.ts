@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Ajv } from 'ajv';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { assertScreened, displayName, fingerprint, record, token } from './guard.ts';
 import { handleMcp, type McpApp } from './mcp.ts';
@@ -37,13 +38,16 @@ function screenedResult(result: CallToolResult, secrets: string[]): unknown {
   };
 }
 
-const schemaValidator = new Ajv({ strict: false, validateFormats: false, addUsedSchema: false });
+const schemaOptions = { strict: false, validateFormats: false, addUsedSchema: false };
+const draft7 = new Ajv(schemaOptions);
+const draft2020 = new Ajv2020(schemaOptions);
 function canUseArgs(schema: Record<string, unknown>, args: Record<string, unknown>): boolean {
-  const check = schemaValidator.compile(schema);
+  const validator = schema.$schema === 'https://json-schema.org/draft/2020-12/schema' ? draft2020 : draft7;
+  const check = validator.compile(schema);
   try {
     return check(args);
   } finally {
-    schemaValidator.removeSchema(schema);
+    validator.removeSchema(schema);
   }
 }
 

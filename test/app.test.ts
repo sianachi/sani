@@ -92,7 +92,17 @@ async function openConsole(context: TestContext) {
   assert.match(cookie, /^[^=]+=[^=]+/);
   await login.text();
 
-  return { directory, web, cookie, form };
+  async function addAgent(name: string, credentialCanary: string) {
+    const added = await form('/agents', { name });
+    assert.equal(added.status, 200);
+    const body = await added.text();
+    const token = body.match(/<code[^>]*>([a-zA-Z0-9_\-]{24,})<\/code>/)?.[1];
+    assert(token, 'the operator receives the new agent credential once');
+    assert.equal(body.includes(credentialCanary), false);
+    return { token, client: await connect(context, web, token) };
+  }
+
+  return { directory, web, cookie, form, addAgent };
 }
 
 test('the operator approves one credential-bearing call and controls what agents can see', { timeout: 30_000 }, async (context) => {
@@ -130,7 +140,7 @@ test('the operator approves one credential-bearing call and controls what agents
     });
   });
 
-  const { directory, web, cookie, form } = await openConsole(context);
+  const { directory, web, cookie, form, addAgent } = await openConsole(context);
 
   const saved = await form('/connections', {
     name: 'widgets',
@@ -152,18 +162,8 @@ test('the operator approves one credential-bearing call and controls what agents
   assert.equal(enabled.status, 303);
   await enabled.text();
 
-  async function addAgent(name: string) {
-    const added = await form('/agents', { name });
-    assert.equal(added.status, 200);
-    const body = await added.text();
-    const token = body.match(/<code[^>]*>([a-zA-Z0-9_\-]{24,})<\/code>/)?.[1];
-    assert(token, 'the operator receives the new agent credential once');
-    assert.equal(body.includes(platformToken), false);
-    return { token, client: await connect(context, web, token) };
-  }
-
-  const agent = await addAgent('first-agent');
-  const other = await addAgent('second-agent');
+  const agent = await addAgent('first-agent', platformToken);
+  const other = await addAgent('second-agent', platformToken);
   const list = await call(agent.client, 'list_actions');
   assert.equal(list.isError, false);
   assert.match(list.body, /inspect_widget/);
@@ -259,8 +259,8 @@ function json(response: ServerResponse, body: unknown): void {
   response.end(JSON.stringify(body));
 }
 
-test('an OAuth callback needs the operator session and its single-use state', { timeout: 30_000 }, async (context) => {
-  const { web, cookie, form, directory } = await openConsole(context);
+test('OAuth connections require a single-use state and validate draft 2020-12 arguments', { timeout: 30_000 }, async (context) => {
+  const { web, cookie, form, directory, addAgent } = await openConsole(context);
   const oauthToken = 'fixture-oauth-access-token-AbC0987654321';
   const code = 'fixture-oauth-code';
   let exchanges = 0;
@@ -323,7 +323,16 @@ test('an OAuth callback needs the operator session and its single-use state', { 
         if (incoming.method === 'tools/list') {
           return json(response, {
             jsonrpc: '2.0', id: incoming.id,
-            result: { tools: [{ name: 'inspect_oauth_resource', inputSchema: { type: 'object' } }] },
+            result: { tools: [{
+              name: 'inspect_oauth_resource',
+              inputSchema: {
+                $schema: 'https://json-schema.org/draft/2020-12/schema',
+                type: 'object',
+                properties: { item: { type: 'string' } },
+                required: ['item'],
+                unevaluatedProperties: false,
+              },
+            }] },
           });
         }
       }
@@ -369,6 +378,20 @@ test('an OAuth callback needs the operator session and its single-use state', { 
   const connected = await dashboard.text();
   assert.match(connected, /inspect_oauth_resource/);
   assert.equal(connected.includes(oauthToken), false);
+
+  const connectionPath = connected.match(/\/connections\/[^/"\s]+\/tools/)?.[0];
+  assert(connectionPath);
+  const enabled = await form(connectionPath, { tool: 'inspect_oauth_resource', enabled: 'true' });
+  assert.equal(enabled.status, 303);
+  await enabled.text();
+
+  const { client } = await addAgent('oauth-agent', oauthToken);
+  const action = { connection: 'oauth-widgets', tool: 'inspect_oauth_resource' };
+  const valid = await call(client, 'request_action', { ...action, args: { item: '17' } });
+  assert.equal(valid.isError, false, valid.body);
+  assert.equal(actionState.parse(JSON.parse(valid.body)).status, 'pending');
+  const invalid = await call(client, 'request_action', { ...action, args: { item: '17', extra: true } });
+  assert.equal(invalid.isError, true);
 
   const replay = await fetch(callback, { headers: { cookie }, redirect: 'manual' });
   assert.equal(replay.status, 400);
