@@ -33,8 +33,8 @@ Real connections are unchanged.
 SANI_DEMO=1 npx github:sianachi/sani
 ```
 
-Docker works the same way with `-e SANI_DEMO=1`, from the first release after
-`v1.0.0-rc.5`. See [Run Sani](#run-sani).
+Docker works the same way with `-e SANI_DEMO=1`, from `v1.0.0-rc.6` on. See
+[Run Sani](#run-sani).
 
 1. Sani prints a sign-in address and, on the first run, your operator
    password.
@@ -187,7 +187,7 @@ docker run --init -p 127.0.0.1:8765:8765 -v sani-data:/app/data ghcr.io/sianachi
 ```
 
 The image is public and built for `linux/amd64` and `linux/arm64`. Pin a
-version with a tag such as `ghcr.io/sianachi/sani:v1.0.0-rc.5`.
+version with a tag such as `ghcr.io/sianachi/sani:v1.0.0-rc.6`.
 
 **From source:**
 
@@ -460,7 +460,7 @@ Docker sandbox test included.
 Pushing a tag `vX.Y.Z` that matches the version in `package.json` runs the
 release workflow. It runs the tests, publishes the multi-arch image to
 `ghcr.io/sianachi/sani` under that tag and `latest`, and creates the GitHub
-release. A tag with a hyphen, such as `v1.0.0-rc.5`, is marked as a
+release. A tag with a hyphen, such as `v1.0.0-rc.6`, is marked as a
 pre-release.
 
 The same workflow publishes `sani-mcp` to npm once the repository has an
@@ -469,7 +469,7 @@ without cloning is `npx github:sianachi/sani`.
 
 ## Status and known limits
 
-Sani is a release candidate (`1.0.0-rc.5`). The interface may still change
+Sani is a release candidate (`1.0.0-rc.6`). The interface may still change
 before 1.0. Start with read-only tools and restricted test credentials.
 
 What works today, each checked against the published code:

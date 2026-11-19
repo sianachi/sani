@@ -22,7 +22,7 @@ Say:
 
 ### 1. Start Sani in demo mode
 
-With Docker, use an image released after `v1.0.0-rc.5`. Earlier images do not have demo mode. The recording did not use Docker.
+With Docker, use `v1.0.0-rc.6` or later. Earlier images do not have demo mode. The recording did not use Docker.
 
 ```sh
 docker run --name sani --init -d \

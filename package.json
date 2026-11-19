@@ -1,6 +1,6 @@
 {
   "name": "sani-mcp",
-  "version": "1.0.0-rc.5",
+  "version": "1.0.0-rc.6",
   "description": "Self-hosted broker that lets AI coding agents use authenticated MCP servers and run credentialed shell commands in a Docker sandbox, with per-request human approval",
   "type": "module",
   "license": "MIT",
