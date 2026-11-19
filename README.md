@@ -427,8 +427,9 @@ Known limits:
 - **The sandbox does not contain the secret.** An approved command can send
   its secrets anywhere the container can reach. See
   [Security boundary](#security-boundary).
-- **The Codex settings are unverified against a live Codex.** They follow
-  the Codex documentation. Claude Code's command has been used with Sani.
+- **The client setup snippets are unverified against live clients.** The
+  Claude Code command and the Codex settings follow each client's
+  documentation. The MCP endpoint itself is covered by the tests.
 - **Tested on macOS and Linux.** Linux is covered by CI. Windows has not been
   tried.
 - **One operator, no sign-in throttling.** Put a rate-limiting reverse proxy
