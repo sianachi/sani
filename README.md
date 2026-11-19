@@ -167,6 +167,12 @@ saves them with its database in `~/.sani` (the `sani-data` volume under
 Docker). If you forget the password, it is in `~/.sani/sani.env`; under Docker
 it is in the first lines of `docker logs`.
 
+To change the password, edit `SANI_ADMIN_PASSWORD` in that file, or in your
+environment if you set it there, and restart Sani. Changing it signs out every
+open console session. Sani has no in-app password change and does not store
+the password in its database: sign-in compares what you type with the
+configured value.
+
 To let agents run commands, build the sandbox image once and restart Sani.
 This needs Docker, and Sani itself running outside Docker:
 
