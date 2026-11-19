@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createApp } from './app.ts';
+import { demoEnabled } from './demo.ts';
 import { dockerSandbox } from './sandbox.ts';
 import { builtSandboxImage, ensureSecrets, localSandboxImage } from './setup.ts';
 
@@ -25,6 +26,7 @@ process.umask(0o077);
 const publicOrigin = process.env.SANI_ORIGIN ?? 'http://127.0.0.1:8765';
 const port = Number(process.env.SANI_PORT ?? '8765');
 const host = process.env.SANI_HOST ?? '127.0.0.1';
+const demo = demoEnabled(process.env.SANI_DEMO);
 const dbPath = resolve(process.env.SANI_DB ?? join(homedir(), '.sani', 'sani.sqlite'));
 mkdirSync(dirname(dbPath), { mode: 0o700, recursive: true });
 const secretsFile = resolve(dirname(dbPath), 'sani.env');
@@ -40,11 +42,13 @@ const app = createApp({
   encryptionKey: Buffer.from(key, 'base64url'),
   adminPassword: process.env.SANI_ADMIN_PASSWORD,
   publicOrigin,
+  demo,
   sandbox: sandboxImage ? dockerSandbox(sandboxImage) : undefined,
 });
 const server = createServer({ requestTimeout: 20_000, headersTimeout: 10_000 }, app.handle);
 server.listen(port, host, () => {
   console.log('Sani is ready at ' + new URL(publicOrigin).origin);
+  if (demo) console.log('Demo mode is on. The built-in demo connection stores no credential and cannot reach other systems.');
   console.log(sandboxImage ? `Sandbox commands run in the ${sandboxImage} image.` : 'Sandbox commands are off. Run "npx github:sianachi/sani sandbox" (needs Docker) and restart to turn them on.');
   if (newPassword) {
     console.log(`\nFirst run: your operator password is\n\n  ${newPassword}\n`);

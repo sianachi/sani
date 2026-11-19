@@ -22,8 +22,55 @@ You can use it two ways, together or separately:
 It works with any client that speaks MCP over HTTP, including Claude Code and
 Codex.
 
+## Try the demo
+
+Demo mode adds a built-in connection named `demo`. It stores no credential and
+cannot reach the network or other systems, so you can see the approval flow
+before you connect a real platform. It is off unless you set `SANI_DEMO=1`.
+Real connections are unchanged.
+
+```sh
+SANI_DEMO=1 npx github:sianachi/sani
+```
+
+Docker works the same way with `-e SANI_DEMO=1`, from the first release after
+`v1.0.0-rc.5`. See [Run Sani](#run-sani).
+
+1. Sani prints a sign-in address and, on the first run, your operator
+   password.
+2. Open <http://127.0.0.1:8765> and sign in. Use that host for the approval
+   link as well: `localhost` is a different site to the browser. The console
+   shows demo mode and the `demo` connection, with `lookup_ticket` enabled.
+3. Create an agent token. Sani shows it once.
+4. Request a demo lookup. Sani does not run it until you approve:
+
+```sh
+export SANI_AGENT_KEY='sani_...'
+curl -sS http://127.0.0.1:8765/mcp \
+  -H "Authorization: Bearer $SANI_AGENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request_action","arguments":{"connection":"demo","tool":"lookup_ticket","args":{"id":"1001"}}}}'
+```
+
+5. Open the `approvalUrl` from the JSON, approve the request, then read the
+   screened result (use the `id` from the same JSON):
+
+```sh
+curl -sS http://127.0.0.1:8765/mcp \
+  -H "Authorization: Bearer $SANI_AGENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_request","arguments":{"id":"PASTE_REQUEST_ID"}}}'
+```
+
+From a clone, `SANI_AGENT_KEY='sani_...' scripts/try-demo.sh` sends that
+request and waits until you approve. [docs/demo](docs/demo) has a walkthrough
+script and a recording.
+
 ## Contents
 
+- [Try the demo](#try-the-demo)
 - [Why Sani exists](#why-sani-exists)
 - [How it works](#how-it-works)
 - [What the agent sees](#what-the-agent-sees)
@@ -206,6 +253,7 @@ matter:
 | `SANI_HOST`, `SANI_PORT` | Listener address and port, default `127.0.0.1` and `8765` |
 | `SANI_DB` | SQLite path, default `~/.sani/sani.sqlite` (`/app/data/sani.sqlite` in the Docker image) |
 | `SANI_SANDBOX_IMAGE` | Docker image for sandbox commands. Unset means Sani uses the `sani-sandbox` image if you built it, and otherwise the sandbox is off |
+| `SANI_DEMO` | Set to `1` or `true` to install the built-in demo connection. Unset, `0`, or `false` leaves it off. Any other value refuses to start |
 
 ## Connect a platform
 
@@ -301,6 +349,13 @@ connection's ID, revision and URL. Agent keys and OAuth state values are
 stored as SHA-256 hashes. Request arguments and results are stored as plain
 JSON in the database, so protect the database file like the data it holds.
 
+**Demo mode.** `SANI_DEMO=1` adds one built-in connection named `demo`. Its
+tools return fixed sample data from inside the process. The connection has no
+token, and approving a demo request does not open a network connection. Demo
+mode does not relax checks on any other connection. Turn it off before you
+rely on Sani for real credentials. The reserved name `demo` is left alone if
+you already created a real connection with that name.
+
 **Outbound calls.** Sani talks to platforms over public HTTPS only. It refuses
 redirects and private, loopback and link-local addresses, checks the resolved
 address at connection time, pins OAuth discovery to the issuer you entered,
@@ -369,7 +424,10 @@ platform token at the provider if you need to end its use outside Sani.
 | `sandbox/Dockerfile` | The default sandbox image |
 | `src/store.ts` | SQLite storage and encryption of stored credentials |
 | `src/guard.ts` | Encryption, fingerprints, credential screening and input checks |
+| `src/demo.ts` | The built-in demo connection. It does not touch the network |
 | `skills/use-sani` | The agent skill |
+| `scripts/try-demo.sh` | Requests the demo ticket and waits for approval |
+| `docs/demo` | Demo walkthrough script, screenshots and recording |
 | `test/` | Tests against local MCP and OAuth fixtures |
 | `.github/workflows/` | CI on every push, and the release that publishes the image |
 
