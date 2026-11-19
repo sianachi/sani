@@ -20,7 +20,8 @@ export type OAuthState = {
 
 export type Auth =
   | { kind: 'bearer'; token: string }
-  | { kind: 'oauth'; issuer: string; state: OAuthState; scope?: string };
+  | { kind: 'oauth'; issuer: string; state: OAuthState; scope?: string }
+  | { kind: 'demo' };
 
 export type RemoteOptions = {
   url: string;
@@ -342,6 +343,7 @@ export class Remote {
   ): Promise<T> {
     const signal = AbortSignal.timeout(timeout);
     const authorization = this.#options.auth;
+    if (authorization.kind === 'demo') throw new RemoteError('The demo connection does not make network calls.');
     const transport = new StreamableHTTPClientTransport(this.#url, {
       fetch: this.#fetch(signal, true, authorizeCall),
       ...(authorization.kind === 'oauth'

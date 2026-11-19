@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import { callDemo, ensureDemoConnection, isDemoConnection, removeDemoConnection } from './demo.ts';
 import { assertScreened, displayName, fingerprint, record, secretName, token } from './guard.ts';
 import { handleMcp, type McpApp } from './mcp.ts';
 import { normalizeRemoteUrl, Remote, type Auth } from './remote.ts';
@@ -18,6 +19,8 @@ export type AppOptions = {
   allowInsecureLoopback?: boolean;
   /** Runs approved commands. Command requests are refused without it. */
   sandbox?: SandboxRun;
+  /** Installs the built-in demo connection. Off unless explicitly enabled. */
+  demo?: boolean;
 };
 
 // Command requests reuse the request table under this connection id, which no real connection can have.
@@ -26,6 +29,7 @@ const COMMAND = 'run_command';
 
 function credentials(auth: Auth): string[] {
   if (auth.kind === 'bearer') return [auth.token];
+  if (auth.kind === 'demo') return [];
   const { tokens, clientInformation, verifier } = auth.state;
   return [
     tokens?.access_token, tokens?.refresh_token, tokens?.id_token,
@@ -68,6 +72,8 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
 
   const publicOrigin = origin.origin;
   const store = new Store(options.dbPath, options.encryptionKey);
+  if (options.demo) ensureDemoConnection(store);
+  else removeDemoConnection(store);
   const busy = new Map<string, Promise<void>>();
   const storedSecrets = (): string[] => [
     ...store.connections().flatMap(connection => credentials(connection.auth)),
@@ -120,6 +126,7 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
   }
 
   function remote(connection: Connection): Remote {
+    if (connection.auth.kind === 'demo') throw new Error('The demo connection does not make network calls.');
     return new Remote({
       url: connection.url,
       auth: connection.auth,
@@ -158,7 +165,11 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
   function startOAuth(id: string): Promise<string> {
     return exclusive(id, async () => {
       const connection = requireConnection(id);
-      if (connection.auth.kind !== 'oauth') throw new Error('This connection uses a bearer token.');
+      if (connection.auth.kind !== 'oauth') {
+        throw new Error(connection.auth.kind === 'demo'
+          ? 'The demo connection has no sign-in.'
+          : 'This connection uses a bearer token.');
+      }
       const { issuer, scope, state: saved } = connection.auth;
       store.changeAuth(connection, {
         kind: 'oauth', issuer, scope, state: { clientInformation: saved.clientInformation },
@@ -190,10 +201,30 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
         secrets: Array.isArray(args.secrets) ? args.secrets.map(String) : [],
       };
     }
+    const connection = store.connection(request.connectionId);
+    const demo = connection !== undefined && isDemoConnection(connection);
     return {
       id, agentName, connectionName, tool, args, status, createdAt, expiresAt, result,
-      connectionUrl: store.connection(request.connectionId)?.url,
+      ...(demo ? { demo: true } : { connectionUrl: connection?.url }),
     };
+  }
+
+  function isDemoRequest(request: Request): boolean {
+    const connection = store.connection(request.connectionId);
+    return connection !== undefined && isDemoConnection(connection);
+  }
+
+  /** Demo calls stay in-process. A failure is final: nothing outside Sani could have run. */
+  function runDemo(request: Request): void {
+    try {
+      const connection = currentRequestConnection(request);
+      if (!options.demo || !isDemoConnection(connection)) throw new Error('The demo is unavailable.');
+      assertScreened(request.args, storedSecrets());
+      const reply = callDemo(request.tool, request.args);
+      store.finish(request.id, 'succeeded', screenedResult(reply, storedSecrets()));
+    } catch {
+      store.finish(request.id, 'failed');
+    }
   }
 
   function currentRequestConnection(request: Request, requireUnexpired = true): Connection {
@@ -213,6 +244,7 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
       return approval(store.request(id) ?? request);
     }
     if (approve && request.connectionId === SANDBOX) await exclusive(SANDBOX, () => runCommand(request));
+    else if (approve && isDemoRequest(request)) await exclusive(request.connectionId, async () => runDemo(request));
     else if (approve) await exclusive(request.connectionId, async () => {
       let sent = false;
       try {
@@ -244,10 +276,12 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
 
   const service: WebApp & McpApp = {
     publicOrigin,
+    demoMode: options.demo === true,
     adminPassword: options.adminPassword,
     sessionKey: createHmac('sha256', options.encryptionKey).update('sani operator session\0').update(options.adminPassword).digest(),
     listConnections: () => store.connections().map(connection => ({
       id: connection.id, name: connection.name, url: connection.url, auth: connection.auth.kind,
+      demo: isDemoConnection(connection),
       connected: connection.connected, tools: store.tools(connection.id).map(({ name, enabled }) => ({ name, enabled })),
     })),
     async createConnection(input) {
@@ -279,7 +313,15 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
       await exclusive(id, () => refresh(requireConnection(id)));
       return { id };
     },
-    refreshConnection: id => exclusive(id, () => refresh(requireConnection(id))),
+    refreshConnection: id => exclusive(id, async () => {
+      const connection = requireConnection(id);
+      if (isDemoConnection(connection)) {
+        if (!options.demo) throw new Error('The demo is unavailable.');
+        ensureDemoConnection(store);
+        return;
+      }
+      await refresh(connection);
+    }),
     enableTool(id, tool, enabled) {
       const connection = requireConnection(id);
       if (!connection.connected) throw new Error('Connect and discover the platform tools first.');
@@ -288,6 +330,7 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
     deleteConnection: id => store.deleteConnection(id),
     rotateToken(id, raw) {
       const connection = requireConnection(id);
+      if (connection.auth.kind === 'demo') throw new Error('The demo connection has no credential.');
       if (connection.auth.kind !== 'bearer') throw new Error('This connection uses OAuth.');
       const next = token(raw);
       assertScreened({ name: connection.name, url: connection.url, tools: store.tools(id) }, [next]);

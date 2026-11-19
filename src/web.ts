@@ -6,7 +6,9 @@ export interface PublicConnection {
   id: string;
   name: string;
   url: string;
-  auth: 'bearer' | 'oauth';
+  auth: 'bearer' | 'oauth' | 'demo';
+  /** Built-in demo connection. It has no credential and cannot make network calls. */
+  demo: boolean;
   connected: boolean;
   tools: { name: string; enabled: boolean }[];
 }
@@ -21,6 +23,8 @@ export interface Approval {
   /** Set for a sandbox command request. */
   command?: string;
   secrets?: string[];
+  /** Built-in demo request. Approving it does not contact another system. */
+  demo?: boolean;
   status: string;
   createdAt: number;
   expiresAt: number;
@@ -29,6 +33,7 @@ export interface Approval {
 
 export interface WebApp {
   publicOrigin: string;
+  demoMode: boolean;
   adminPassword: string;
   sessionKey: Buffer;
   listConnections(): PublicConnection[];
@@ -110,6 +115,7 @@ dt{color:var(--muted)}
 dd{margin:0;overflow-wrap:anywhere}
 .narrow{max-width:43rem}
 .auth{max-width:28rem}
+.banner{background:#fff4d6;border:1px solid #d9b656;padding:.75rem 1rem;border-radius:.35rem;margin:0 0 1.25rem}
 details{margin-top:.7rem}
 .start{margin-bottom:2rem}
 .start ol{margin:0;padding-left:1.3rem}
@@ -161,9 +167,14 @@ function layout(title: string, content: string, signedIn: boolean): string {
 ${signedIn ? action('/logout', 'Sign out') : ''}</div></header><main>${content}</main><script>${copyScript}</script></body></html>`;
 }
 
-function render(res: ServerResponse, status: number, title: string, content: string, signedIn: boolean) {
+function render(res: ServerResponse, status: number, title: string, content: string, signedIn: boolean, banner = '') {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(layout(title, content, signedIn));
+  res.end(layout(title, banner + content, signedIn));
+}
+
+function demoBanner(app: WebApp): string {
+  if (!app.demoMode) return '';
+  return '<p class="banner"><strong>Demo mode.</strong> The built-in demo connection stores no credential and cannot reach the network or other systems.</p>';
 }
 
 function redirect(res: ServerResponse, location: string) {
@@ -171,7 +182,7 @@ function redirect(res: ServerResponse, location: string) {
   res.end();
 }
 
-function providerSignIn(res: ServerResponse, app: WebApp, authorizationUrl: string) {
+function providerSignIn(res: ServerResponse, app: WebApp, authorizationUrl: string, banner: string) {
   const destination = new URL(authorizationUrl);
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(destination.hostname);
   if (destination.username || destination.password
@@ -180,7 +191,7 @@ function providerSignIn(res: ServerResponse, app: WebApp, authorizationUrl: stri
   }
   render(res, 200, 'Provider sign-in', `<div class="narrow stack"><h1>Provider sign-in</h1>
 <p>Continue to ${esc(destination.host)} to authorize this connection.</p>
-<p><a class="primary link-button" rel="noreferrer" href="${esc(destination.href)}">Continue to provider</a></p></div>`, true);
+<p><a class="primary link-button" rel="noreferrer" href="${esc(destination.href)}">Continue to provider</a></p></div>`, true, banner);
 }
 
 function sign(key: Buffer, value: string): string {
@@ -222,20 +233,31 @@ function safeReturn(value: string): string {
   return /^\/requests\/[\w-]+$/.test(value) ? value : '/';
 }
 
-function login(res: ServerResponse, next: string, failed = false) {
+function login(res: ServerResponse, next: string, failed = false, banner = '') {
   render(res, failed ? 401 : 200, 'Operator sign-in',
     `<div class="auth stack"><h1>Operator sign-in</h1>
 ${failed ? '<p role="alert">Check your operator password and try again.</p>' : ''}
 <div class="panel"><form method="post" action="/login">${hidden('next', safeReturn(next))}
 <label>Operator password<input type="password" name="password" maxlength="1024" autocomplete="current-password" required autofocus></label>
-<button class="primary">Sign in</button></form></div></div>`, false);
+<button class="primary">Sign in</button></form></div></div>`, false, banner);
+}
+
+function toolRows(connection: PublicConnection): string {
+  const path = connectionPath(connection.id);
+  return connection.tools.map(tool =>
+    `<div class="line row"><code>${esc(tool.name)}</code>
+${action(`${path}/tools`, tool.enabled ? 'Disable' : 'Enable', '', hidden('tool', tool.name) + hidden('enabled', String(!tool.enabled)))}</div>`).join('');
 }
 
 function connectionCard(connection: PublicConnection): string {
   const path = connectionPath(connection.id);
-  const toolRows = connection.tools.map(tool =>
-    `<div class="line row"><code>${esc(tool.name)}</code>
-${action(`${path}/tools`, tool.enabled ? 'Disable' : 'Enable', '', hidden('tool', tool.name) + hidden('enabled', String(!tool.enabled)))}</div>`).join('');
+  const tools = toolRows(connection);
+  if (connection.demo || connection.auth === 'demo') {
+    return `<article class="panel"><h3>${esc(connection.name)}</h3>
+<p><strong>Built-in demo.</strong> No credential. Calls stay inside Sani and cannot reach other systems.</p>
+${tools || '<p><small>No demo tools are enabled.</small></p>'}
+<div class="row">${action(`${path}/delete`, 'Remove connection', 'danger')}</div></article>`;
+  }
   const credentialAction = connection.auth === 'oauth'
     ? action(`${path}/oauth`, connection.connected ? 'Sign in again' : 'Sign in to provider')
     : `<details><summary>Replace token</summary><form method="post" action="${path}/rotate">
@@ -249,7 +271,7 @@ ${action(`${path}/tools`, tool.enabled ? 'Disable' : 'Enable', '', hidden('tool'
 ${connection.auth === 'oauth' ? credentialAction : ''}
 ${action(`${path}/delete`, 'Remove connection', 'danger')}</div>
 ${connection.auth === 'bearer' ? credentialAction : ''}
-${toolRows || '<p><small>No tools discovered yet.</small></p>'}</article>`;
+${tools || '<p><small>No tools discovered yet.</small></p>'}</article>`;
 }
 
 // Read-only starting points. The operator still signs in at the provider and enables each tool.
@@ -329,14 +351,15 @@ ${step(requests.length > 0, 'Ask your agent to use Sani. Its requests appear und
 ${connectionRows}${addConnectionForm(app.publicOrigin, preset)}</section></div>
 <div><section id="requests"><h2>Requests</h2><div class="panel">${requestRows || '<p>Requests from your agents appear here.</p>'}</div></section>
 <section id="agents"><h2>Agents</h2><div class="panel">${agentRows}
+${app.demoMode ? '<p><small>For a trial, create a token and request the demo connection’s <code>lookup_ticket</code> tool.</small></p>' : ''}
 <form method="post" action="/agents"><label>Agent name<input name="name" maxlength="80" required></label>
-<button class="primary">Create agent token</button></form></div></section>${secrets}</div></div>`, true);
+<button class="primary">Create agent token</button></form></div></section>${secrets}</div></div>`, true, demoBanner(app));
 }
 
 function showRequest(res: ServerResponse, app: WebApp, id: string) {
   const pending = app.getRequest(id);
   if (!pending) {
-    render(res, 404, 'Request unavailable', '<h1>Request unavailable</h1><p><a href="/#requests">View requests</a></p>', true);
+    render(res, 404, 'Request unavailable', '<h1>Request unavailable</h1><p><a href="/#requests">View requests</a></p>', true, demoBanner(app));
     return;
   }
 
@@ -344,23 +367,31 @@ function showRequest(res: ServerResponse, app: WebApp, id: string) {
   const controls = pending.status === 'pending' && pending.expiresAt > Date.now()
     ? `<div class="row">${action(`${requestPath(id)}/approve`, 'Approve and run', 'primary')}${action(`${requestPath(id)}/decline`, 'Decline', 'danger')}</div>`
     : '';
-  const title = pending.command === undefined ? 'Tool request' : 'Command request';
+  const title = pending.demo ? 'Demo request' : pending.command === undefined ? 'Tool request' : 'Command request';
+  const facts = pending.demo
+    ? `<dt>Connection</dt><dd>Demo (built-in)</dd>
+<dt>Endpoint</dt><dd>None. This call stays inside Sani.</dd>
+<dt>Tool</dt><dd><code>${esc(pending.tool)}</code></dd>`
+    : pending.command === undefined
+      ? `<dt>Connection</dt><dd>${esc(pending.connectionName)}</dd>
+${pending.connectionUrl ? `<dt>Endpoint</dt><dd>${esc(pending.connectionUrl)}</dd>` : ''}
+<dt>Tool</dt><dd><code>${esc(pending.tool)}</code></dd>`
+      : `<dt>Runs in</dt><dd>Sandbox container</dd>
+<dt>Secrets it receives</dt><dd>${pending.secrets?.length ? pending.secrets.map(name => `<code>${esc(name)}</code>`).join(' ') : 'None'}</dd>`;
   render(res, 200, title, `<div class="narrow stack"><a href="/#requests">All requests</a><h1>${title}</h1>
 <section class="panel stack"><dl>
 <dt>Status</dt><dd>${statusLabel(pending.status)}</dd>
 <dt>Agent</dt><dd>${esc(pending.agentName)}</dd>
-${pending.command === undefined ? `<dt>Connection</dt><dd>${esc(pending.connectionName)}</dd>
-${pending.connectionUrl ? `<dt>Endpoint</dt><dd>${esc(pending.connectionUrl)}</dd>` : ''}
-<dt>Tool</dt><dd><code>${esc(pending.tool)}</code></dd>` : `<dt>Runs in</dt><dd>Sandbox container</dd>
-<dt>Secrets it receives</dt><dd>${pending.secrets?.length ? pending.secrets.map(name => `<code>${esc(name)}</code>`).join(' ') : 'None'}</dd>`}
+${facts}
 <dt>Expires</dt><dd>${timestamp(pending.expiresAt)}</dd>
 </dl>
 ${pending.command === undefined ? `<div><h2>Inputs</h2><pre>${detail(pending.args)}</pre></div>`
     : `<div><h2>Command</h2>${commandView(pending.command)}
 <p><small>The command can send its secrets anywhere it can reach. Approve it only if you understand every part.</small></p></div>`}
+${pending.demo ? '<p><strong>Built-in demo.</strong> Approving runs this call inside Sani. It does not use a credential or contact another system.</p>' : ''}
 ${controls}
 ${pending.result === undefined ? '' : `<div><h2>Result</h2>${renderResult(pending.result)}</div>`}
-</section></div>`, true);
+</section></div>`, true, demoBanner(app));
 }
 
 async function form(req: IncomingMessage): Promise<URLSearchParams> {
@@ -385,8 +416,8 @@ function field(fields: URLSearchParams, name: string, max: number, required = tr
   return value;
 }
 
-function errorPage(res: ServerResponse, status: number, title: string, message: string, signedIn: boolean) {
-  render(res, status, title, `<div class="stack"><h1>${esc(title)}</h1><p role="alert">${esc(message)}</p><p><a href="/">Return to Sani</a></p></div>`, signedIn);
+function errorPage(res: ServerResponse, status: number, title: string, message: string, signedIn: boolean, banner = '') {
+  render(res, status, title, `<div class="stack"><h1>${esc(title)}</h1><p role="alert">${esc(message)}</p><p><a href="/">Return to Sani</a></p></div>`, signedIn, banner);
 }
 
 export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: URL, app: WebApp): Promise<void> {
@@ -401,11 +432,12 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
 
   const signedIn = isOperator(req, app);
   const path = url.pathname;
+  const banner = demoBanner(app);
   try {
     if (req.method === 'GET') {
       if (path === '/oauth/callback') {
         if (!signedIn) {
-          errorPage(res, 401, 'Sign in to finish connecting', 'Sign in to Sani, then start the provider sign-in again.', false);
+          errorPage(res, 401, 'Sign in to finish connecting', 'Sign in to Sani, then start the provider sign-in again.', false, banner);
           return;
         }
         await app.finishOAuth(field(url.searchParams, 'state', 500), field(url.searchParams, 'code', 4096));
@@ -413,7 +445,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
         return;
       }
       if (!signedIn) {
-        login(res, path);
+        login(res, path, false, banner);
         return;
       }
       if (path === '/') {
@@ -429,11 +461,11 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
 
     if (req.method === 'POST') {
       if (req.headers.origin !== app.publicOrigin) {
-        errorPage(res, 403, 'Request forbidden', 'Submit this action from the Sani console.', signedIn);
+        errorPage(res, 403, 'Request forbidden', 'Submit this action from the Sani console.', signedIn, banner);
         return;
       }
       if (path !== '/login' && !signedIn) {
-        errorPage(res, 401, 'Sign in to continue', 'Sign in to the Sani console before submitting this action.', false);
+        errorPage(res, 401, 'Sign in to continue', 'Sign in to the Sani console before submitting this action.', false, banner);
         return;
       }
       const fields = await form(req);
@@ -445,7 +477,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
       if (path === '/login') {
         const next = safeReturn(field(fields, 'next', 400, false));
         if (!constantEqual(field(fields, 'password', 1024), app.adminPassword)) {
-          login(res, next, true);
+          login(res, next, true, banner);
           return;
         }
         setSession(res, app, true);
@@ -473,7 +505,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
           clientSecret,
           scope: auth === 'oauth' ? field(fields, 'scope', 2048, false) : '',
         });
-        if (created.authorizationUrl) providerSignIn(res, app, created.authorizationUrl);
+        if (created.authorizationUrl) providerSignIn(res, app, created.authorizationUrl, banner);
         else redirect(res, '/#connections');
         return;
       }
@@ -490,7 +522,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
             break;
           }
           case 'oauth':
-            providerSignIn(res, app, await app.startOAuth(id));
+            providerSignIn(res, app, await app.startOAuth(id), banner);
             return;
         }
         redirect(res, '/#connections');
@@ -515,7 +547,7 @@ ${commandView(`export SANI_AGENT_KEY=${agent.token}`)}</div>
 ${commandView(`URL:    ${endpoint}\nHeader: Authorization: Bearer ${agent.token}`, 'settings')}</div>
 <div><h2>Token only</h2>${commandView(agent.token, 'token')}</div>
 <p><small>Sani tells a connected agent how to use it. Clients that ignore server instructions can load the <code>skills/use-sani</code> skill from the Sani repository.</small></p></section>
-<p><a href="/#agents">Return to agents</a></p></div>`, true);
+<p><a href="/#agents">Return to agents</a></p></div>`, true, banner);
         return;
       }
       if (path === '/secrets') {
@@ -535,15 +567,15 @@ ${commandView(`URL:    ${endpoint}\nHeader: Authorization: Bearer ${agent.token}
       }
     }
 
-    errorPage(res, 404, 'Page unavailable', 'Check the link and try again.', signedIn);
+    errorPage(res, 404, 'Page unavailable', 'Check the link and try again.', signedIn, banner);
   } catch (error) {
     if (error === invalidForm) {
-      errorPage(res, 400, 'Check the form', 'A required value is missing or invalid.', signedIn);
+      errorPage(res, 400, 'Check the form', 'A required value is missing or invalid.', signedIn, banner);
     } else if (error === oversizedForm) {
       req.resume();
-      errorPage(res, 413, 'Form too large', 'Reduce the size of your input and try again.', signedIn);
+      errorPage(res, 413, 'Form too large', 'Reduce the size of your input and try again.', signedIn, banner);
     } else {
-      errorPage(res, 400, 'Action failed', 'Check the connection and input, then try again.', signedIn);
+      errorPage(res, 400, 'Action failed', 'Check the connection and input, then try again.', signedIn, banner);
     }
   }
 }
