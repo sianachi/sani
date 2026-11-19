@@ -80,6 +80,14 @@ export function token(value: string): string {
   return value;
 }
 
+export function secretName(value: string): string {
+  // SANI_ and DOCKER_ names, PATH and HOME configure the docker client that starts the sandbox.
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(value) || /^(SANI_|DOCKER_|PATH$|HOME$)/.test(value)) {
+    throw new Error('Use an environment variable name such as GH_TOKEN.');
+  }
+  return value;
+}
+
 export function displayName(value: string): string {
   const name = value.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,63}$/.test(name)) {

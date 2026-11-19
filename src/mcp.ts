@@ -13,6 +13,12 @@ export interface McpApp {
     agentId: string,
     input: { connection: string; tool: string; args: Record<string, unknown> },
   ): { id: string; status: string; approvalUrl: string };
+  /** Secret names the sandbox can inject, or undefined when the sandbox is off. */
+  sandboxSecrets?(): string[] | undefined;
+  requestCommand?(
+    agentId: string,
+    input: { command: string; secrets: string[] },
+  ): { id: string; status: string; approvalUrl: string };
   requestResult(agentId: string, id: string): { id: string; status: string; result?: unknown } | undefined;
 }
 
@@ -42,7 +48,25 @@ function serverFor(app: McpApp, agentId: string): McpServer {
     actions: app.listAgentTools(agentId).map(({ connection, tool, inputSchema }) => ({
       connection, tool, inputSchema,
     })),
+    ...(app.sandboxSecrets?.() && { sandbox: { secrets: app.sandboxSecrets() } }),
   }), 'Could not list Sani actions.'));
+
+  if (app.sandboxSecrets?.() && app.requestCommand) {
+    const requestCommand = app.requestCommand.bind(app);
+    server.registerTool('request_command', {
+      description: 'Request a shell command in the Sani sandbox, with the named stored secrets set as environment variables. '
+        + 'Returns the Sani approval link. A human must approve the exact command before it runs. '
+        + 'list_actions shows the secret names.',
+      inputSchema: {
+        command: z.string().min(1).max(4096),
+        secrets: z.array(z.string().max(64)).max(16).default([]),
+      },
+      annotations: { destructiveHint: true },
+    }, (input) => toolReply(() => {
+      const { id, status, approvalUrl } = requestCommand(agentId, input);
+      return { id, status, approvalUrl };
+    }, 'Sani refused this command request. Check the command and the secret names.'));
+  }
 
   server.registerTool('request_action', {
     description: 'Request an enabled platform action and return the Sani approval link. A human must approve before the action runs.',

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createApp } from './app.ts';
+import { dockerSandbox } from './sandbox.ts';
 
 process.umask(0o077);
 const publicOrigin = process.env.SANI_ORIGIN ?? 'http://127.0.0.1:8765';
@@ -18,6 +19,7 @@ const app = createApp({
   encryptionKey: Buffer.from(key, 'base64url'),
   adminPassword: process.env.SANI_ADMIN_PASSWORD,
   publicOrigin,
+  sandbox: process.env.SANI_SANDBOX_IMAGE ? dockerSandbox(process.env.SANI_SANDBOX_IMAGE) : undefined,
 });
 const server = createServer({ requestTimeout: 20_000, headersTimeout: 10_000 }, app.handle);
 server.listen(port, host, () => console.log('Sani is ready at ' + new URL(publicOrigin).origin));

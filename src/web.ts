@@ -17,6 +17,9 @@ export interface Approval {
   connectionUrl?: string;
   tool: string;
   args: Record<string, unknown>;
+  /** Set for a sandbox command request. */
+  command?: string;
+  secrets?: string[];
   status: string;
   createdAt: number;
   expiresAt: number;
@@ -50,6 +53,10 @@ export interface WebApp {
   createAgent(name: string): { id: string; token: string };
   listAgents(): { id: string; name: string }[];
   revokeAgent(id: string): void;
+  sandboxEnabled: boolean;
+  listSecrets(): string[];
+  setSecret(name: string, value: string): void;
+  deleteSecret(name: string): void;
 }
 
 const css = `
@@ -127,7 +134,7 @@ const action = (path: string, label: string, className = '', fields = '') =>
 
 function layout(title: string, content: string, signedIn: boolean): string {
   const nav = signedIn
-    ? '<nav aria-label="Console"><a href="/#connections">Connections</a><a href="/#requests">Requests</a><a href="/#agents">Agents</a></nav>'
+    ? '<nav aria-label="Console"><a href="/#connections">Connections</a><a href="/#requests">Requests</a><a href="/#agents">Agents</a><a href="/#secrets">Secrets</a></nav>'
     : '';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} | Sani</title>
@@ -268,13 +275,23 @@ function dashboard(res: ServerResponse, app: WebApp) {
   const agentRows = agents.map(agent =>
     `<div class="line"><div class="row"><h3>${esc(agent.name)}</h3>${action(`${agentPath(agent.id)}/revoke`, 'Revoke access', 'danger')}</div></div>`).join('');
 
+  const secretRows = app.listSecrets().map(name =>
+    `<div class="line row"><code>${esc(name)}</code>${action(`/secrets/${encodeURIComponent(name)}/delete`, 'Remove', 'danger')}</div>`).join('');
+  const secrets = `<section id="secrets"><h2>Sandbox secrets</h2><div class="panel">
+<p><small>${app.sandboxEnabled
+    ? 'An approved command receives the secrets it names as environment variables.'
+    : 'The sandbox is off. Set SANI_SANDBOX_IMAGE to let agents request commands.'}</small></p>${secretRows}
+<form method="post" action="/secrets"><label>Name <small>For example GH_TOKEN</small><input name="name" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+<label>Value<input type="password" name="value" autocomplete="off" maxlength="8192" required></label>
+<button class="primary">Save secret</button></form></div></section>`;
+
   render(res, 200, 'Operator console', `<h1>Operator console</h1>
 <div class="grid"><div><section id="connections" class="stack"><h2>Connections</h2>
 ${connectionRows}${addConnectionForm(app.publicOrigin)}</section></div>
 <div><section id="requests"><h2>Requests</h2><div class="panel">${requestRows || '<p>Requests from your agents appear here.</p>'}</div></section>
 <section id="agents"><h2>Agents</h2><div class="panel">${agentRows}
 <form method="post" action="/agents"><label>Agent name<input name="name" maxlength="80" required></label>
-<button class="primary">Create agent token</button></form></div></section></div></div>`, true);
+<button class="primary">Create agent token</button></form></div></section>${secrets}</div></div>`, true);
 }
 
 function showRequest(res: ServerResponse, app: WebApp, id: string) {
@@ -288,16 +305,20 @@ function showRequest(res: ServerResponse, app: WebApp, id: string) {
   const controls = pending.status === 'pending' && pending.expiresAt > Date.now()
     ? `<div class="row">${action(`${requestPath(id)}/approve`, 'Approve and run', 'primary')}${action(`${requestPath(id)}/decline`, 'Decline', 'danger')}</div>`
     : '';
-  render(res, 200, 'Tool request', `<div class="narrow stack"><a href="/#requests">All requests</a><h1>Tool request</h1>
+  const title = pending.command === undefined ? 'Tool request' : 'Command request';
+  render(res, 200, title, `<div class="narrow stack"><a href="/#requests">All requests</a><h1>${title}</h1>
 <section class="panel stack"><dl>
 <dt>Status</dt><dd>${statusLabel(pending.status)}</dd>
 <dt>Agent</dt><dd>${esc(pending.agentName)}</dd>
-<dt>Connection</dt><dd>${esc(pending.connectionName)}</dd>
+${pending.command === undefined ? `<dt>Connection</dt><dd>${esc(pending.connectionName)}</dd>
 ${pending.connectionUrl ? `<dt>Endpoint</dt><dd>${esc(pending.connectionUrl)}</dd>` : ''}
-<dt>Tool</dt><dd><code>${esc(pending.tool)}</code></dd>
+<dt>Tool</dt><dd><code>${esc(pending.tool)}</code></dd>` : `<dt>Runs in</dt><dd>Sandbox container</dd>
+<dt>Secrets it receives</dt><dd>${pending.secrets?.length ? pending.secrets.map(name => `<code>${esc(name)}</code>`).join(' ') : 'None'}</dd>`}
 <dt>Expires</dt><dd>${timestamp(pending.expiresAt)}</dd>
 </dl>
-<div><h2>Inputs</h2><pre>${detail(pending.args)}</pre></div>
+${pending.command === undefined ? `<div><h2>Inputs</h2><pre>${detail(pending.args)}</pre></div>`
+    : `<div><h2>Command</h2><pre>${esc(pending.command)}</pre>
+<p><small>The command can send its secrets anywhere it can reach. Approve it only if you understand every part.</small></p></div>`}
 ${controls}
 ${pending.result === undefined ? '' : `<div><h2>Result</h2><pre>${detail(pending.result)}</pre></div>`}
 </section></div>`, true);
@@ -380,6 +401,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
       const connection = /^\/connections\/([\w-]+)\/(refresh|delete|rotate|oauth|tools)$/.exec(path);
       const request = /^\/requests\/([\w-]+)\/(approve|decline)$/.exec(path);
       const revoke = /^\/agents\/([\w-]+)\/revoke$/.exec(path);
+      const secret = /^\/secrets\/([A-Z0-9_]+)\/delete$/.exec(path);
 
       if (path === '/login') {
         const next = safeReturn(field(fields, 'next', 400, false));
@@ -445,6 +467,16 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
         render(res, 200, 'Agent token', `<div class="narrow stack"><h1>Agent token</h1>
 <p>Copy this token into your agent’s MCP connection settings. This page displays it once.</p>
 <pre><code>${esc(agent.token)}</code></pre><p><a href="/#agents">Return to agents</a></p></div>`, true);
+        return;
+      }
+      if (path === '/secrets') {
+        app.setSecret(field(fields, 'name', 64), field(fields, 'value', 8192));
+        redirect(res, '/#secrets');
+        return;
+      }
+      if (secret?.[1]) {
+        app.deleteSecret(secret[1]);
+        redirect(res, '/#secrets');
         return;
       }
       if (revoke?.[1]) {

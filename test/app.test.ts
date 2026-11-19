@@ -12,6 +12,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod';
 
 import { createApp } from '../src/app.ts';
+import { NotStarted, type SandboxRun } from '../src/sandbox.ts';
 
 async function listen(context: TestContext, handle: RequestListener): Promise<string> {
   const server = createServer(handle);
@@ -60,7 +61,7 @@ async function state(client: Client, id: string) {
   return actionState.parse(JSON.parse(result.body));
 }
 
-async function openConsole(context: TestContext) {
+async function openConsole(context: TestContext, sandbox?: SandboxRun) {
   const directory = await mkdtemp(join(tmpdir(), 'sani-app-test-'));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const adminPassword = 'fixture-operator-password-7654321';
@@ -72,6 +73,7 @@ async function openConsole(context: TestContext) {
     adminPassword,
     publicOrigin: web,
     allowInsecureLoopback: true,
+    sandbox,
   });
   handle = app.handle;
   context.after(() => app.close());
@@ -429,3 +431,91 @@ test('pre-registered OAuth uses saved client credentials without dynamic registr
     clientSecret: 'fixture-existing-client-secret-123456',
     scope: 'offline_access',
   }));
+
+test('an approved command runs once in the sandbox with only the secrets it named', { timeout: 30_000 }, async (context) => {
+  const ghToken = 'fixture-gh-token-AbC0987654321';
+  const otherToken = 'fixture-other-token-XyZ1234567890';
+  const runs: { command: string; env: Record<string, string> }[] = [];
+  const sandbox: SandboxRun = async ({ command, env }) => {
+    runs.push({ command, env });
+    if (command === 'missing-image') throw new NotStarted('no image');
+    if (command === 'hang') throw new Error('timed out');
+    if (command === 'leak') return { exitCode: 0, output: 'token=' + Buffer.from(ghToken).toString('base64') };
+    if (command === 'long') return { exitCode: 0, output: 'x'.repeat(20_000) };
+    return { exitCode: 3, output: 'two open pull requests\n' };
+  };
+  const { web, cookie, form, addAgent } = await openConsole(context, sandbox);
+  const { client } = await addAgent('builder', ghToken);
+  const outsider = (await addAgent('outsider', ghToken)).client;
+
+  assert.equal((await form('/secrets', { name: 'GH_TOKEN', value: ghToken })).status, 303);
+  assert.equal((await form('/secrets', { name: 'OTHER_TOKEN', value: otherToken })).status, 303);
+  for (const name of ['SANI_ENCRYPTION_KEY', 'DOCKER_HOST', 'PATH', 'lower']) {
+    assert.equal((await form('/secrets', { name, value: otherToken })).status, 400, name);
+  }
+
+  const listed = await call(client, 'list_actions');
+  assert.deepEqual(JSON.parse(listed.body).sandbox, { secrets: ['GH_TOKEN', 'OTHER_TOKEN'] });
+  assert.equal(listed.body.includes(ghToken), false);
+
+  async function request(command: string, secrets: string[] = ['GH_TOKEN']) {
+    const reply = await call(client, 'request_command', { command, secrets });
+    assert.equal(reply.isError, false, reply.body);
+    return actionState.parse(JSON.parse(reply.body));
+  }
+  const approve = async (id: string) => assert.equal((await form(`/requests/${id}/approve`)).status, 303);
+
+  assert.equal((await call(client, 'request_command', { command: 'gh pr list', secrets: ['ABSENT'] })).isError, true);
+  assert.equal((await call(client, 'request_command', { command: `echo ${ghToken}`, secrets: [] })).isError, true);
+
+  const pending = await request('gh pr list --repo "acme/site"');
+  assert.equal(pending.approvalUrl, `${web}/requests/${pending.id}`);
+  assert.equal(runs.length, 0, 'nothing runs before approval');
+  assert.equal((await call(outsider, 'get_request', { id: pending.id })).isError, true);
+  const page = await (await fetch(pending.approvalUrl, { headers: { cookie } })).text();
+  assert.match(page, /gh pr list --repo &quot;acme\/site&quot;/);
+  assert.match(page, /<code>GH_TOKEN<\/code>/);
+  assert.equal(page.includes(ghToken), false);
+
+  await approve(pending.id);
+  await approve(pending.id);
+  assert.deepEqual(runs, [{ command: 'gh pr list --repo "acme/site"', env: { GH_TOKEN: ghToken } }]);
+  assert.deepEqual((await state(client, pending.id)).result,
+    { exitCode: 3, output: 'two open pull requests\n', truncated: false });
+
+  const leaked = await request('leak');
+  await approve(leaked.id);
+  const withheld = await state(client, leaked.id);
+  assert.equal(withheld.status, 'failed');
+  assert.equal(withheld.result, undefined);
+
+  const long = await request('long');
+  await approve(long.id);
+  const cut = z.object({ output: z.string(), truncated: z.boolean() }).parse((await state(client, long.id)).result);
+  assert.equal(cut.output.length, 16 * 1024);
+  assert.equal(cut.truncated, true);
+
+  const unstarted = await request('missing-image');
+  await approve(unstarted.id);
+  assert.equal((await state(client, unstarted.id)).status, 'failed');
+  const hung = await request('hang');
+  await approve(hung.id);
+  assert.equal((await state(client, hung.id)).status, 'unknown');
+
+  const stale = await request('gh pr list');
+  assert.equal((await form('/secrets', { name: 'GH_TOKEN', value: 'fixture-gh-token-rotated-000000' })).status, 303);
+  const before = runs.length;
+  await approve(stale.id);
+  assert.equal((await state(client, stale.id)).status, 'failed');
+  assert.equal(runs.length, before, 'replacing a secret invalidates the requests waiting on it');
+
+  assert.equal((await form('/secrets/OTHER_TOKEN/delete')).status, 303);
+  assert.deepEqual(JSON.parse((await call(client, 'list_actions')).body).sandbox, { secrets: ['GH_TOKEN'] });
+});
+
+test('command requests do not exist while the sandbox is off', async (context) => {
+  const { addAgent } = await openConsole(context);
+  const { client } = await addAgent('builder', 'unused-credential-canary');
+  assert.equal('sandbox' in JSON.parse((await call(client, 'list_actions')).body), false);
+  assert.equal((await client.listTools()).tools.some(tool => tool.name === 'request_command'), false);
+});

@@ -79,6 +79,9 @@ export class Store {
         state_hash TEXT PRIMARY KEY, connection_id TEXT UNIQUE NOT NULL REFERENCES connection(id) ON DELETE CASCADE,
         revision INTEGER NOT NULL, expires_at INTEGER NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS secret (
+        name TEXT PRIMARY KEY, id TEXT NOT NULL, value TEXT NOT NULL
+      ) STRICT;
       UPDATE request SET status = 'unknown' WHERE status = 'running';
     `);
   }
@@ -204,7 +207,29 @@ export class Store {
 
   revokeAgent(id: string): void { this.#db.prepare('DELETE FROM agent WHERE id = ?').run(id); }
 
-  addRequest(agent: {id: string; name: string}, connection: Connection, tool: EnabledTool, args: Record<string, unknown>): string {
+  setSecret(name: string, value: string): void {
+    const id = randomUUID();
+    this.#db.prepare('INSERT OR REPLACE INTO secret VALUES (?, ?, ?)')
+      .run(name, id, seal(this.#key, JSON.stringify(['secret', name, id]), value));
+  }
+
+  deleteSecret(name: string): void { this.#db.prepare('DELETE FROM secret WHERE name = ?').run(name); }
+
+  /** The id changes whenever the value is replaced. */
+  secrets(): {name: string; id: string; value: string}[] {
+    return this.#db.prepare('SELECT * FROM secret ORDER BY name').all().map(row => {
+      const name = text(row, 'name');
+      const id = text(row, 'id');
+      return { name, id, value: String(unseal(this.#key, JSON.stringify(['secret', name, id]), text(row, 'value'))) };
+    });
+  }
+
+  addRequest(
+    agent: {id: string; name: string},
+    connection: Pick<Connection, 'id' | 'name' | 'revision'>,
+    tool: Pick<EnabledTool, 'name' | 'fingerprint'>,
+    args: Record<string, unknown>,
+  ): string {
     const now = Date.now();
     const open = this.#db.prepare("SELECT count(*) AS total FROM request WHERE agent_id = ? AND status = 'pending' AND expires_at > ?")
       .get(agent.id, now);

@@ -3,9 +3,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
-import { assertScreened, displayName, fingerprint, record, token } from './guard.ts';
+import { assertScreened, displayName, fingerprint, record, secretName, token } from './guard.ts';
 import { handleMcp, type McpApp } from './mcp.ts';
 import { normalizeRemoteUrl, Remote, type Auth } from './remote.ts';
+import { NotStarted, outputBytes, type SandboxRun } from './sandbox.ts';
 import { Store, type Connection, type Request } from './store.ts';
 import { handleWeb, type Approval, type WebApp } from './web.ts';
 
@@ -15,7 +16,13 @@ export type AppOptions = {
   adminPassword: string;
   publicOrigin: string;
   allowInsecureLoopback?: boolean;
+  /** Runs approved commands. Command requests are refused without it. */
+  sandbox?: SandboxRun;
 };
+
+// Command requests reuse the request table under this connection id, which no real connection can have.
+const SANDBOX = 'sandbox';
+const COMMAND = 'run_command';
 
 function credentials(auth: Auth): string[] {
   if (auth.kind === 'bearer') return [auth.token];
@@ -62,7 +69,49 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
   const publicOrigin = origin.origin;
   const store = new Store(options.dbPath, options.encryptionKey);
   const busy = new Map<string, Promise<void>>();
-  const storedSecrets = (): string[] => store.connections().flatMap(connection => credentials(connection.auth));
+  const storedSecrets = (): string[] => [
+    ...store.connections().flatMap(connection => credentials(connection.auth)),
+    ...store.secrets().map(secret => secret.value),
+  ];
+  /** The named secrets, with a fingerprint that changes when any of them is replaced or removed. */
+  function commandSecrets(names: unknown): { env: Record<string, string>; fingerprint: string } {
+    if (!Array.isArray(names) || names.length > 16 || new Set(names).size !== names.length) {
+      throw new Error('Name up to 16 different secrets.');
+    }
+    const stored = store.secrets();
+    const chosen = names.map(name => {
+      const secret = stored.find(candidate => candidate.name === name);
+      if (!secret) throw new Error('A requested secret is unavailable.');
+      return secret;
+    });
+    return {
+      env: Object.fromEntries(chosen.map(({ name, value }) => [name, value])),
+      fingerprint: fingerprint(chosen.map(({ name, id }) => [name, id])),
+    };
+  }
+  async function runCommand(request: Request): Promise<void> {
+    let sent = false;
+    try {
+      const { command, secrets } = request.args;
+      const { env, fingerprint: current } = commandSecrets(secrets);
+      if (!options.sandbox || typeof command !== 'string' || !store.agentExists(request.agentId) ||
+        current !== request.toolFingerprint) {
+        throw new Error('This request no longer matches the stored secrets.');
+      }
+      assertScreened(request.args, storedSecrets());
+      sent = true;
+      const { exitCode, output } = await options.sandbox({ id: request.id, command, env });
+      try {
+        assertScreened(output, [...Object.values(env), ...storedSecrets()]);
+        const kept = Buffer.from(output).subarray(0, outputBytes).toString('utf8');
+        store.finish(request.id, 'succeeded', { exitCode, output: kept, truncated: kept !== output });
+      } catch {
+        store.finish(request.id, 'failed');
+      }
+    } catch (error) {
+      store.finish(request.id, sent && !(error instanceof NotStarted) ? 'unknown' : 'failed');
+    }
+  }
 
   function requireConnection(id: string): Connection {
     const connection = store.connection(id);
@@ -134,6 +183,13 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
     if (result !== undefined) {
       try { assertScreened(result, secrets); } catch { result = undefined; }
     }
+    if (request.connectionId === SANDBOX) {
+      return {
+        id, agentName, connectionName, tool, args, status, createdAt, expiresAt, result,
+        command: String(args.command ?? ''),
+        secrets: Array.isArray(args.secrets) ? args.secrets.map(String) : [],
+      };
+    }
     return {
       id, agentName, connectionName, tool, args, status, createdAt, expiresAt, result,
       connectionUrl: store.connection(request.connectionId)?.url,
@@ -156,7 +212,8 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
     if (request.status !== 'pending' || !store.claim(id, approve ? 'running' : 'declined')) {
       return approval(store.request(id) ?? request);
     }
-    if (approve) await exclusive(request.connectionId, async () => {
+    if (approve && request.connectionId === SANDBOX) await exclusive(SANDBOX, () => runCommand(request));
+    else if (approve) await exclusive(request.connectionId, async () => {
       let sent = false;
       try {
         const connection = currentRequestConnection(request);
@@ -253,6 +310,26 @@ export function createApp(options: AppOptions): {handle: (req: IncomingMessage, 
       return result && approval(result);
     },
     decide,
+    sandboxEnabled: options.sandbox !== undefined,
+    listSecrets: () => store.secrets().map(secret => secret.name),
+    setSecret(rawName, value) {
+      const name = secretName(rawName);
+      // Shorter values would make screening withhold ordinary output.
+      if (!/^[^\0\r\n]{8,8192}$/.test(value)) throw new Error('Enter a secret of 8 to 8192 characters on one line.');
+      store.setSecret(name, value);
+    },
+    deleteSecret: name => store.deleteSecret(name),
+    sandboxSecrets: () => options.sandbox ? store.secrets().map(secret => secret.name) : undefined,
+    requestCommand(agentId, input) {
+      const agent = store.agents().find(candidate => candidate.id === agentId);
+      if (!agent || !options.sandbox) throw new Error('The sandbox is unavailable.');
+      if (input.command.includes('\0')) throw new Error('The command is invalid.');
+      const args = { command: input.command, secrets: input.secrets };
+      assertScreened(args, storedSecrets());
+      const id = store.addRequest(agent, { id: SANDBOX, name: SANDBOX, revision: 0 },
+        { name: COMMAND, fingerprint: commandSecrets(input.secrets).fingerprint }, args);
+      return { id, status: 'pending', approvalUrl: new URL('/requests/' + id, publicOrigin).href };
+    },
     createAgent: name => store.createAgent(displayName(name)),
     listAgents: () => store.agents(),
     revokeAgent: id => store.revokeAgent(id),

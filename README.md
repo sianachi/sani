@@ -1,10 +1,21 @@
 # Sani
 
 Sani is a small self-hosted broker that sits between AI coding agents and the
-authenticated MCP servers they want to use. The agent never holds a platform
-credential. It asks Sani for an action, a person approves that exact call in a
-browser, and Sani makes the call with the credential it keeps on its own
-server. The agent gets back a screened result.
+credentials they need. The agent never holds a token. It asks Sani to do
+something, a person approves that exact request in a browser, and Sani does it
+with the credential it keeps on its own server. The agent gets back a screened
+result.
+
+You can use it two ways, together or separately:
+
+- **MCP tool calls.** Connect an authenticated MCP server such as GitHub or
+  Linear. The agent requests one of the tools you enabled and Sani makes the
+  call with the stored token or OAuth sign-in.
+- **Shell commands.** Store a secret such as `GH_TOKEN`. The agent requests a
+  command, for example `gh pr list --repo acme/site`, and Sani runs it in a
+  throwaway Docker container with only the secrets that command named. This
+  covers CLIs and plain HTTP APIs that have no MCP server. See
+  [Run commands in the sandbox](#run-commands-in-the-sandbox).
 
 It works with any client that speaks MCP over HTTP, including Claude Code and
 Codex.
@@ -18,6 +29,7 @@ Codex.
 - [Run Sani](#run-sani)
 - [Settings](#settings)
 - [Connect a platform](#connect-a-platform)
+- [Run commands in the sandbox](#run-commands-in-the-sandbox)
 - [Connect an agent](#connect-an-agent)
 - [Security boundary](#security-boundary)
 - [Limits](#limits)
@@ -38,6 +50,9 @@ not see. Sani changes three things:
 - **A person approves each call.** Every request shows the connection, the
   tool and the exact arguments. Nothing is sent until you approve it, and an
   approval is spent on one dispatch.
+- **Commands run away from the agent.** A command that needs a secret runs in
+  a locked-down container on Sani's host, so the secret never reaches the
+  agent's shell, files or context.
 - **Only the tools you enable exist.** Sani lists a platform's tools and you
   switch on the ones you want. If the platform later changes a tool's
   definition, Sani switches it off until you review it again.
@@ -70,14 +85,19 @@ not see. Sani changes three things:
 7. Sani screens the reply for stored credentials and keeps the text and
    structured data. The agent fetches it with `get_request`.
 
+A shell command follows the same path: the agent calls `request_command`, you
+approve the exact command line, and Sani runs it once in the sandbox and
+returns the exit code and screened output.
+
 ## What the agent sees
 
-Sani is itself an MCP server at `<SANI_ORIGIN>/mcp`. It exposes three tools:
+Sani is itself an MCP server at `<SANI_ORIGIN>/mcp`. It exposes these tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_actions` | List the enabled actions and their argument schemas |
+| `list_actions` | List the enabled actions and their argument schemas, and the sandbox's secret names |
 | `request_action` | Ask for one action; returns a request ID and an approval link |
+| `request_command` | Ask to run one shell command in the sandbox; present only when the sandbox is on |
 | `get_request` | Read the status, and the result once there is one, of the agent's own request |
 
 An agent can read only the requests it made. Errors returned to the agent are
@@ -145,6 +165,7 @@ docker run --name sani --init --env-file .env \
 | `SANI_ORIGIN` | Browser origin used for approval links, session cookies and the OAuth callback. HTTPS, or HTTP on loopback. Default `http://127.0.0.1:8765` |
 | `SANI_HOST`, `SANI_PORT` | Listener address and port, default `127.0.0.1` and `8765` |
 | `SANI_DB` | SQLite path, default `data/sani.sqlite` |
+| `SANI_SANDBOX_IMAGE` | Docker image for sandbox commands. Unset means the sandbox is off |
 
 ## Connect a platform
 
@@ -172,6 +193,37 @@ Suggested first connections:
   at `https://mcp.linear.app/mcp/readonly`. Choose OAuth and enter
   `https://mcp.linear.app` as the issuer. Enable an issue lookup and read a test issue.
 
+## Run commands in the sandbox
+
+Some platforms have a CLI and no MCP server. For those, an agent can ask Sani
+to run a shell command with a stored secret in its environment.
+
+1. Build or pull an image that holds the tools you want, for example one with
+   `gh` or `curl`. Sani never pulls it for you.
+2. Start Sani with `SANI_SANDBOX_IMAGE` set to that image. The host needs the
+   `docker` CLI and access to a Docker daemon.
+3. In the console, add **Sandbox secrets**. The name is the environment
+   variable the command sees, for example `GH_TOKEN`.
+4. The agent calls `request_command` with a command and the secret names it
+   needs. You see the exact command and the names, and approve or decline.
+5. Sani runs `sh -c <command>` in a new container and returns the exit code
+   and the combined output.
+
+Each run gets a fresh container that is removed afterwards. It runs as an
+unprivileged user with all capabilities dropped, a read-only filesystem apart
+from a 64 MiB `/tmp`, no host mounts, 512 MiB of memory, one CPU and a 60
+second limit. It receives only the secrets the request named. Commands run one
+at a time.
+
+Replacing or removing a secret invalidates the requests waiting on it. A
+command that fails to start is `failed`; one that times out is `unknown`,
+because it may have acted before it was stopped. A non-zero exit code is a
+`succeeded` request with that exit code in the result.
+
+The official Sani image does not contain Docker. To use the sandbox, run Sani
+directly on the host, or give its container a Docker CLI and daemon access,
+which is equivalent to root on that host.
+
 ## Connect an agent
 
 Connect the client to `<SANI_ORIGIN>/mcp` with its own Sani agent key in the
@@ -191,8 +243,8 @@ request once. The agent fetches the result using the original agent key.
 
 ## Security boundary
 
-**Credentials at rest.** Bearer tokens, OAuth tokens and OAuth client secrets
-are encrypted with AES-256-GCM under `SANI_ENCRYPTION_KEY`, bound to the
+**Credentials at rest.** Bearer tokens, OAuth tokens, OAuth client secrets and
+sandbox secrets are encrypted with AES-256-GCM under `SANI_ENCRYPTION_KEY`, bound to the
 connection's ID, revision and URL. Agent keys and OAuth state values are
 stored as SHA-256 hashes. Request arguments and results are stored as plain
 JSON in the database, so protect the database file like the data it holds.
@@ -208,6 +260,15 @@ every stored credential, as plain text, URL-encoded, base64 and base64url.
 Matching data is withheld. Results are limited to text and structured data up
 to 64 KiB. The screening guarantee covers the stored credentials and the
 encodings checked by the test suite; it is not a general secret scanner.
+
+**Sandbox commands.** The container isolates the command from the Sani host,
+its database and its key. It does not isolate the secret from the command: a
+command holding `GH_TOKEN` can send it to any host the container can reach,
+or print it in a form screening does not recognise. The container has normal
+outbound network access, including to private addresses reachable from the
+host. Your review of the exact command is the control, so decline anything
+you do not fully understand, and give each secret the narrowest scope the
+provider allows.
 
 **Approval.** Only a signed-in operator can approve. The session cookie is
 HttpOnly and SameSite, lasts 8 hours, and is invalidated by changing the
@@ -234,6 +295,10 @@ platform token at the provider if you need to end its use outside Sani.
 | Screened arguments or result | 64 KiB |
 | Platform response | 1 MiB |
 | Platform call timeout | 15 seconds |
+| Sandbox command length | 4096 characters |
+| Sandbox command time | 60 seconds |
+| Sandbox output returned | 16 KiB |
+| Secrets per command | 16 |
 | Processes per database | 1 |
 
 ## Project layout
@@ -245,13 +310,14 @@ platform token at the provider if you need to end its use outside Sani.
 | `src/mcp.ts` | The MCP endpoint agents connect to |
 | `src/web.ts` | The operator pages: sign-in, connections, agent keys, approvals |
 | `src/remote.ts` | Outbound MCP and OAuth client with the network rules |
+| `src/sandbox.ts` | Runs approved commands in Docker |
 | `src/store.ts` | SQLite storage and encryption of stored credentials |
 | `src/guard.ts` | Encryption, fingerprints, credential screening and input checks |
 | `skills/use-sani` | The agent skill |
 | `test/` | Tests against local MCP and OAuth fixtures |
 
 Runtime dependencies are the MCP SDK, Ajv, ipaddr.js, undici and Zod. Storage
-is Node's built-in SQLite.
+is Node's built-in SQLite. The sandbox uses the `docker` CLI on the host.
 
 ## Verify
 
@@ -264,11 +330,12 @@ npm audit --omit=dev
 The automated suite uses isolated HTTP MCP and OAuth fixtures. For live
 provider acceptance, use a restricted test token and a test repository,
 then repeat with a Linear test workspace and its browser OAuth flow. Check
-that each action waits for approval and returns its expected result.
+that each action waits for approval and returns its expected result. The
+Docker sandbox test runs only when Docker and the `alpine:3` image are present.
 
 ## Status
 
-Sani is a release candidate (`1.0.0-rc.3`). The interface may still change
+Sani is a release candidate (`1.0.0-rc.4`). The interface may still change
 before 1.0. Start with read-only tools and restricted test credentials.
 
 ## Licence
