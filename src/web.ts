@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { commandView, copyScript, esc, renderResult } from './render.ts';
 
 export interface PublicConnection {
   id: string;
@@ -110,20 +111,35 @@ dd{margin:0;overflow-wrap:anywhere}
 .narrow{max-width:43rem}
 .auth{max-width:28rem}
 details{margin-top:.7rem}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:left;vertical-align:top;padding:.38rem .55rem;border-bottom:1px solid var(--rule);overflow-wrap:break-word}
+thead th{color:var(--muted);font-weight:650;white-space:nowrap;border-bottom:2px solid var(--rule)}
+tbody tr:last-child>*{border-bottom:0}
+.fields th{color:var(--muted);font-weight:500;width:1%;white-space:nowrap}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tight{white-space:nowrap}
+.cmd{border-radius:.35rem;overflow:hidden;background:#131b2e;color:#e6ecfb}
+.cmd-bar{display:flex;align-items:center;justify-content:space-between;padding:.3rem .45rem .3rem .9rem;background:#1e2942;color:#a9b8d6;font-size:.82rem}
+.cmd pre{background:none;border:0;padding:.75rem .9rem .85rem 0;font-size:.9rem;line-height:1.6;counter-reset:l}
+.cmd .l{display:block;position:relative;padding-left:3.1rem;min-height:1.6em;counter-increment:l}
+.cmd .l::before{content:counter(l);position:absolute;left:0;width:2.2rem;text-align:right;color:#6f80a3;user-select:none}
+.icon{display:inline-flex;align-items:center;gap:.3rem;background:none;border-color:transparent;color:inherit;padding:.3rem .4rem;font-size:.82rem}
+.icon:hover{background:#2c3a5c}
+.cmd+p{margin-top:.6rem}
+.result ul{padding-left:1.2rem}
+.result button{padding:.25rem .6rem;font-size:.88rem}
 details summary{cursor:pointer;font-weight:650;color:var(--accent)}
 @media(max-width:47rem){header>div,main{width:calc(100% - 2rem)}header>div{display:grid;grid-template-columns:1fr auto;gap:.45rem .8rem;padding-block:.55rem}header nav{grid-column:1/-1;grid-row:2}header form{grid-column:2;grid-row:1}.grid{grid-template-columns:1fr;gap:1.25rem}main{padding-top:1.5rem}}
 `;
 
 const cssHash = createHash('sha256').update(css).digest('base64');
+const scriptHash = createHash('sha256').update(copyScript).digest('base64');
 const durationSeconds = 8 * 60 * 60;
 const bodyLimit = 32 * 1024;
 const invalidForm = new Error('Invalid form');
 const oversizedForm = new Error('Oversized form');
 
-const entities: Record<string, string> = {
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-};
-const esc = (text: string) => text.replace(/[&<>"']/g, character => entities[character] ?? '');
 const requestPath = (id: string) => `/requests/${encodeURIComponent(id)}`;
 const connectionPath = (id: string) => `/connections/${encodeURIComponent(id)}`;
 const agentPath = (id: string) => `/agents/${encodeURIComponent(id)}`;
@@ -139,7 +155,7 @@ function layout(title: string, content: string, signedIn: boolean): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} | Sani</title>
 <style>${css}</style></head><body><header><div><a class="brand" href="/">Sani</a>${nav}
-${signedIn ? action('/logout', 'Sign out') : ''}</div></header><main>${content}</main></body></html>`;
+${signedIn ? action('/logout', 'Sign out') : ''}</div></header><main>${content}</main><script>${copyScript}</script></body></html>`;
 }
 
 function render(res: ServerResponse, status: number, title: string, content: string, signedIn: boolean) {
@@ -317,10 +333,10 @@ ${pending.connectionUrl ? `<dt>Endpoint</dt><dd>${esc(pending.connectionUrl)}</d
 <dt>Expires</dt><dd>${timestamp(pending.expiresAt)}</dd>
 </dl>
 ${pending.command === undefined ? `<div><h2>Inputs</h2><pre>${detail(pending.args)}</pre></div>`
-    : `<div><h2>Command</h2><pre>${esc(pending.command)}</pre>
+    : `<div><h2>Command</h2>${commandView(pending.command)}
 <p><small>The command can send its secrets anywhere it can reach. Approve it only if you understand every part.</small></p></div>`}
 ${controls}
-${pending.result === undefined ? '' : `<div><h2>Result</h2><pre>${detail(pending.result)}</pre></div>`}
+${pending.result === undefined ? '' : `<div><h2>Result</h2>${renderResult(pending.result)}</div>`}
 </section></div>`, true);
 }
 
@@ -357,7 +373,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Content-Security-Policy',
-    `default-src 'none'; style-src 'sha256-${cssHash}'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    `default-src 'none'; style-src 'sha256-${cssHash}'; script-src 'sha256-${scriptHash}'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
   if (secure(app)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
 
   const signedIn = isOperator(req, app);
