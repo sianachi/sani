@@ -1,5 +1,7 @@
 # Sani
 
+[![CI](https://github.com/sianachi/sani/actions/workflows/ci.yml/badge.svg)](https://github.com/sianachi/sani/actions/workflows/ci.yml)
+
 Sani is a small self-hosted broker that sits between AI coding agents and the
 credentials they need. The agent never holds a token. It asks Sani to do
 something, a person approves that exact request in a browser, and Sani does it
@@ -35,7 +37,8 @@ Codex.
 - [Limits](#limits)
 - [Project layout](#project-layout)
 - [Verify](#verify)
-- [Status](#status)
+- [Releases](#releases)
+- [Status and known limits](#status-and-known-limits)
 - [Licence](#licence)
 
 ## Why Sani exists
@@ -122,7 +125,7 @@ approval.
 ## Run Sani
 
 Pick one. Each prints a sign-in address and, on the first run, your operator
-password.
+password. There is nothing to configure first.
 
 **With Node.js** (24.13 or newer), nothing to clone:
 
@@ -135,6 +138,9 @@ npx github:sianachi/sani
 ```sh
 docker run --init -p 127.0.0.1:8765:8765 -v sani-data:/app/data ghcr.io/sianachi/sani
 ```
+
+The image is public and built for `linux/amd64` and `linux/arm64`. Pin a
+version with a tag such as `ghcr.io/sianachi/sani:v1.0.0-rc.5`.
 
 **From source:**
 
@@ -350,6 +356,7 @@ platform token at the provider if you need to end its use outside Sani.
 | `src/mcp.ts` | The MCP endpoint agents connect to |
 | `src/web.ts` | The operator pages: sign-in, connections, agent keys, approvals |
 | `src/remote.ts` | Outbound MCP and OAuth client with the network rules |
+| `src/index.ts sandbox` | The `sani-mcp sandbox` subcommand that builds the sandbox image |
 | `src/sandbox.ts` | Runs approved commands in Docker |
 | `src/setup.ts` | First-run password and key, and sandbox image detection |
 | `src/render.ts` | Result tables and the command view |
@@ -358,9 +365,14 @@ platform token at the provider if you need to end its use outside Sani.
 | `src/guard.ts` | Encryption, fingerprints, credential screening and input checks |
 | `skills/use-sani` | The agent skill |
 | `test/` | Tests against local MCP and OAuth fixtures |
+| `.github/workflows/` | CI on every push, and the release that publishes the image |
 
 Runtime dependencies are the MCP SDK, Ajv, ipaddr.js, undici and Zod. Storage
 is Node's built-in SQLite. The sandbox uses the `docker` CLI on the host.
+
+From a clone Sani runs its TypeScript sources directly. The installed command
+(`sani-mcp`) runs a compiled copy in `dist/`, built by `npm run build`, because
+Node does not run TypeScript from inside `node_modules`.
 
 ## Verify
 
@@ -376,10 +388,52 @@ then repeat with a Linear test workspace and its browser OAuth flow. Check
 that each action waits for approval and returns its expected result. The
 Docker sandbox test runs only when Docker and the `alpine:3` image are present.
 
-## Status
+CI runs the same three commands on every push and pull request, with the
+Docker sandbox test included.
+
+## Releases
+
+Pushing a tag `vX.Y.Z` that matches the version in `package.json` runs the
+release workflow. It runs the tests, publishes the multi-arch image to
+`ghcr.io/sianachi/sani` under that tag and `latest`, and creates the GitHub
+release. A tag with a hyphen, such as `v1.0.0-rc.5`, is marked as a
+pre-release.
+
+The same workflow publishes `sani-mcp` to npm once the repository has an
+`NPM_TOKEN` secret. Until then that step is skipped, and the way to run Sani
+without cloning is `npx github:sianachi/sani`.
+
+## Status and known limits
 
 Sani is a release candidate (`1.0.0-rc.5`). The interface may still change
 before 1.0. Start with read-only tools and restricted test credentials.
+
+What works today, each checked against the published code:
+
+- `npx github:sianachi/sani` and the Docker image both start with no
+  configuration and print a first-run password.
+- MCP tool calls with bearer tokens and OAuth, and sandbox commands with
+  stored secrets, each behind one approval.
+- Copy-ready agent setup for Claude Code, Codex and other MCP clients.
+
+Known limits:
+
+- **Not on npm yet.** `npx sani-mcp` does not work until the package is
+  published; use the GitHub form above.
+- **No sandbox when Sani runs in Docker.** The image has no Docker client.
+  Run Sani on the host to use sandbox commands.
+- **First-run setup trades safety for ease.** It stores the encryption key
+  beside the database. See [For real credentials](#for-real-credentials).
+- **The sandbox does not contain the secret.** An approved command can send
+  its secrets anywhere the container can reach. See
+  [Security boundary](#security-boundary).
+- **The Codex settings are unverified against a live Codex.** They follow
+  the Codex documentation. Claude Code's command has been used with Sani.
+- **Tested on macOS and Linux.** Linux is covered by CI. Windows has not been
+  tried.
+- **One operator, no sign-in throttling.** Put a rate-limiting reverse proxy
+  in front of a Sani that others can reach.
+- **No independent security audit.**
 
 ## Licence
 
