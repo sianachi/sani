@@ -54,7 +54,8 @@ jobs:
       contents: read
       id-token: write
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Not NODE_AUTH_TOKEN: setup-node fills that with a placeholder when it is empty.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,8 +63,10 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       # Skipped until the repository has an NPM_TOKEN secret.
-      - if: env.NODE_AUTH_TOKEN != ''
+      - if: env.NPM_TOKEN != ''
         run: npm ci && npm publish --access public --provenance --tag latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   github-release:
     needs: [image]
