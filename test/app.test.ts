@@ -98,7 +98,8 @@ async function openConsole(context: TestContext, sandbox?: SandboxRun) {
     const added = await form('/agents', { name });
     assert.equal(added.status, 200);
     const body = await added.text();
-    const token = body.match(/<code[^>]*>([a-zA-Z0-9_\-]{24,})<\/code>/)?.[1];
+    const token = body.match(/<span class="l">(sani_[a-zA-Z0-9_\-]{43})<\/span>/)?.[1];
+    assert(body.includes(`claude mcp add --transport http sani ${web}/mcp --header &quot;Authorization: Bearer ${token}&quot;`));
     assert(token, 'the operator receives the new agent credential once');
     assert.equal(body.includes(credentialCanary), false);
     return { token, client: await connect(context, web, token) };
@@ -514,7 +515,11 @@ test('an approved command runs once in the sandbox with only the secrets it name
 });
 
 test('command requests do not exist while the sandbox is off', async (context) => {
-  const { addAgent } = await openConsole(context);
+  const { web, cookie, addAgent } = await openConsole(context);
+  const fresh = await (await fetch(new URL('/?connect=linear', web), { headers: { cookie } })).text();
+  assert.match(fresh, /Get started/);
+  assert.match(fresh, /name="url"[^>]* value="https:\/\/mcp\.linear\.app\/mcp\/readonly"/);
+  assert.match(fresh, /<option value="oauth" selected>/);
   const { client } = await addAgent('builder', 'unused-credential-canary');
   assert.equal('sandbox' in JSON.parse((await call(client, 'list_actions')).body), false);
   assert.equal((await client.listTools()).tools.some(tool => tool.name === 'request_command'), false);

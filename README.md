@@ -121,51 +121,79 @@ approval.
 
 ## Run Sani
 
-Use Node.js 24.13 or newer. Sani runs its TypeScript sources directly, so
-there is no build step. For local testing, generate a new operator password
-and encryption key in a private environment file. This command refuses to
-overwrite an existing file.
+Pick one. Each prints a sign-in address and, on the first run, your operator
+password.
+
+**With Node.js** (24.13 or newer), nothing to clone:
 
 ```sh
+npx github:sianachi/sani
+```
+
+**With Docker:**
+
+```sh
+docker run --init -p 127.0.0.1:8765:8765 -v sani-data:/app/data ghcr.io/sianachi/sani
+```
+
+**From source:**
+
+```sh
+git clone https://github.com/sianachi/sani.git
+cd sani
 npm ci
-node --input-type=module -e '
-  import { randomBytes } from "node:crypto";
-  import { writeFileSync } from "node:fs";
-  const lines = [`SANI_ADMIN_PASSWORD=${randomBytes(24).toString("base64url")}`,
-                 `SANI_ENCRYPTION_KEY=${randomBytes(32).toString("base64url")}`];
-  writeFileSync(".env", lines.join("\n") + "\n", { mode: 0o600, flag: "wx" });
-'
-node --env-file=.env src/index.ts
+npm start
 ```
 
-Open the configured origin (default `http://127.0.0.1:8765`) and sign in with
-the operator password from your environment file. Enter platform credentials
-only on the Sani page.
+Then open `http://127.0.0.1:8765`, sign in, and follow **Get started** on the
+page:
 
-For real credentials, run Sani on a trusted host or isolated account outside
-the agents' shell, file, and container-management access. Use an HTTPS origin
-and a reverse proxy. Keep the encryption key separate from the database
-backup. Losing the key requires re-enrolling your connections. Run one Sani
-process per database. Configure the proxy to omit request bodies,
-Authorization headers, and OAuth callback query strings from access logs.
+1. Add a connection (the form has one-click starting points for Linear and
+   GitHub) or save a secret for sandbox commands.
+2. Create an agent token. Sani shows the exact command that connects Claude
+   Code, the settings for Codex, and the URL and header for any other MCP
+   client.
+3. Ask your agent to use Sani and approve its requests. Sani tells a
+   connected agent how to use it, so there is nothing else to install.
+
+On the first run Sani creates the operator password and an encryption key and
+saves them with its database in `~/.sani` (the `sani-data` volume under
+Docker). If you forget the password, it is in `~/.sani/sani.env`; under Docker
+it is in the first lines of `docker logs`.
+
+To let agents run commands, build the sandbox image once and restart Sani.
+This needs Docker, and Sani itself running outside Docker:
 
 ```sh
-docker build -t sani .
-docker run --name sani --init --env-file .env \
-  -e SANI_ORIGIN=https://sani.example.com \
-  -p 127.0.0.1:8765:8765 -v sani-data:/app/data sani
+npx github:sianachi/sani sandbox
 ```
+
+### For real credentials
+
+The first-run setup keeps the encryption key beside the database, which is
+convenient and fine for trying Sani out. Before you store credentials that
+matter:
+
+- Set `SANI_ADMIN_PASSWORD` and `SANI_ENCRYPTION_KEY` yourself, for example
+  in the environment or an env file, and keep the key separate from the
+  database backup. Losing the key requires re-enrolling your connections.
+- Run Sani on a trusted host or isolated account outside the agents' shell,
+  file, and container-management access.
+- Set `SANI_ORIGIN` to an HTTPS origin behind a reverse proxy. Configure the
+  proxy to omit request bodies, Authorization headers, and OAuth callback
+  query strings from access logs.
+- Run one Sani process per database.
 
 ## Settings
 
 | Setting | Purpose |
 | --- | --- |
-| `SANI_ADMIN_PASSWORD` | Browser sign-in password, at least 16 characters |
-| `SANI_ENCRYPTION_KEY` | 32 random bytes encoded as base64url |
+| `SANI_ADMIN_PASSWORD` | Browser sign-in password, at least 16 characters. Created on first run if neither this nor the key is set |
+| `SANI_ENCRYPTION_KEY` | 32 random bytes encoded as base64url. Created on first run likewise |
 | `SANI_ORIGIN` | Browser origin used for approval links, session cookies and the OAuth callback. HTTPS, or HTTP on loopback. Default `http://127.0.0.1:8765` |
 | `SANI_HOST`, `SANI_PORT` | Listener address and port, default `127.0.0.1` and `8765` |
-| `SANI_DB` | SQLite path, default `data/sani.sqlite` |
-| `SANI_SANDBOX_IMAGE` | Docker image for sandbox commands. Unset means the sandbox is off |
+| `SANI_DB` | SQLite path, default `~/.sani/sani.sqlite` (`/app/data/sani.sqlite` in the Docker image) |
+| `SANI_SANDBOX_IMAGE` | Docker image for sandbox commands. Unset means Sani uses the `sani-sandbox` image if you built it, and otherwise the sandbox is off |
 
 ## Connect a platform
 
@@ -198,10 +226,13 @@ Suggested first connections:
 Some platforms have a CLI and no MCP server. For those, an agent can ask Sani
 to run a shell command with a stored secret in its environment.
 
-1. Build or pull an image that holds the tools you want, for example one with
-   `gh` or `curl`. Sani never pulls it for you.
-2. Start Sani with `SANI_SANDBOX_IMAGE` set to that image. The host needs the
-   `docker` CLI and access to a Docker daemon.
+1. Run `npx github:sianachi/sani sandbox` (or `npm run sandbox:build` in a
+   clone). It builds the `sani-sandbox` image, which holds `curl`, `jq`, `git`
+   and `gh`. To add tools, edit `sandbox/Dockerfile` in a clone and rebuild.
+   If you add the `gh` CLI's token as a secret, name it `GH_TOKEN`.
+2. Restart Sani. It uses that image when it exists. To use a different image,
+   set `SANI_SANDBOX_IMAGE`; Sani never pulls an image for you. The host needs
+   the `docker` CLI and access to a Docker daemon.
 3. In the console, add **Sandbox secrets**. The name is the environment
    variable the command sees, for example `GH_TOKEN`.
 4. The agent calls `request_command` with a command and the secret names it
@@ -226,16 +257,25 @@ which is equivalent to root on that host.
 
 ## Connect an agent
 
-Connect the client to `<SANI_ORIGIN>/mcp` with its own Sani agent key in the
+Creating an agent token shows a ready-to-run command for Claude Code:
+
+```sh
+claude mcp add --transport http sani <SANI_ORIGIN>/mcp --header "Authorization: Bearer sani_..."
+```
+
+For any other client, connect it to `<SANI_ORIGIN>/mcp` with its own Sani agent key in the
 HTTP Authorization header (`Authorization: Bearer sani_...`). Use the client's
 [Claude Code MCP configuration](https://code.claude.com/docs/en/mcp) or
 [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
-Copy `skills/use-sani` into a skills directory for
-[Claude Code](https://code.claude.com/docs/en/skills) or
-[Codex](https://learn.chatgpt.com/docs/build-skills). The skill tells the
+For Codex, the token page shows the `~/.codex/config.toml` entry to paste.
+
+Sani sends its usage instructions to every connected client, telling the
 agent to request actions through Sani, hand you the approval link, wait, and
-keep credentials out of chat and tool arguments.
+keep credentials out of chat and tool arguments. If your client ignores
+server instructions, copy `skills/use-sani` into its skills directory for
+[Claude Code](https://code.claude.com/docs/en/skills) or
+[Codex](https://learn.chatgpt.com/docs/build-skills).
 
 Ask the client to use an enabled action. Open the Sani approval link to
 review the connection, tool, and exact arguments. Approving dispatches the
@@ -311,6 +351,9 @@ platform token at the provider if you need to end its use outside Sani.
 | `src/web.ts` | The operator pages: sign-in, connections, agent keys, approvals |
 | `src/remote.ts` | Outbound MCP and OAuth client with the network rules |
 | `src/sandbox.ts` | Runs approved commands in Docker |
+| `src/setup.ts` | First-run password and key, and sandbox image detection |
+| `src/render.ts` | Result tables and the command view |
+| `sandbox/Dockerfile` | The default sandbox image |
 | `src/store.ts` | SQLite storage and encryption of stored credentials |
 | `src/guard.ts` | Encryption, fingerprints, credential screening and input checks |
 | `skills/use-sani` | The agent skill |
@@ -335,7 +378,7 @@ Docker sandbox test runs only when Docker and the `alpine:3` image are present.
 
 ## Status
 
-Sani is a release candidate (`1.0.0-rc.4`). The interface may still change
+Sani is a release candidate (`1.0.0-rc.5`). The interface may still change
 before 1.0. Start with read-only tools and restricted test credentials.
 
 ## Licence

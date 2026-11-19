@@ -16,10 +16,10 @@ const copyIcon = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="t
   + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h.5"/></svg>';
 
 /** The exact command, one numbered line per line. Long lines wrap so nothing sits off screen during review. */
-export function commandView(command: string): string {
+export function commandView(command: string, label = 'sh'): string {
   const lines = command.replace(/\n$/, '').split('\n');
-  return `<div class="cmd"><div class="cmd-bar"><span>sh · ${lines.length} ${lines.length === 1 ? 'line' : 'lines'}</span>`
-    + `<button type="button" data-copy class="icon" aria-label="Copy command" title="Copy command">${copyIcon}</button>`
+  return `<div class="cmd"><div class="cmd-bar"><span>${esc(label)} · ${lines.length} ${lines.length === 1 ? 'line' : 'lines'}</span>`
+    + `<button type="button" data-copy class="icon" aria-label="Copy" title="Copy">${copyIcon}</button>`
     + `<textarea hidden readonly>${esc(command)}</textarea></div>`
     + `<pre><code>${lines.map(line => `<span class="l">${esc(line)}</span>`).join('')}</code></pre></div>`;
 }

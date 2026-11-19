@@ -111,6 +111,9 @@ dd{margin:0;overflow-wrap:anywhere}
 .narrow{max-width:43rem}
 .auth{max-width:28rem}
 details{margin-top:.7rem}
+.start{margin-bottom:2rem}
+.start ol{margin:0;padding-left:1.3rem}
+.start li+li{margin-top:.35rem}
 .scroll{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:.93rem}
 th,td{text-align:left;vertical-align:top;padding:.38rem .55rem;border-bottom:1px solid var(--rule);overflow-wrap:break-word}
@@ -126,7 +129,7 @@ tbody tr:last-child>*{border-bottom:0}
 .cmd .l::before{content:counter(l);position:absolute;left:0;width:2.2rem;text-align:right;color:#6f80a3;user-select:none}
 .icon{display:inline-flex;align-items:center;gap:.3rem;background:none;border-color:transparent;color:inherit;padding:.3rem .4rem;font-size:.82rem}
 .icon:hover{background:#2c3a5c}
-.cmd+p{margin-top:.6rem}
+.cmd+p,.cmd+.cmd{margin-top:.6rem}
 .result ul{padding-left:1.2rem}
 .result button{padding:.25rem .6rem;font-size:.88rem}
 details summary{cursor:pointer;font-weight:650;color:var(--accent)}
@@ -249,15 +252,26 @@ ${connection.auth === 'bearer' ? credentialAction : ''}
 ${toolRows || '<p><small>No tools discovered yet.</small></p>'}</article>`;
 }
 
-function addConnectionForm(publicOrigin: string): string {
+// Read-only starting points. The operator still signs in at the provider and enables each tool.
+const presets: Record<string, { label: string; name: string; url: string; issuer: string }> = {
+  linear: { label: 'Linear (read-only)', name: 'linear', url: 'https://mcp.linear.app/mcp/readonly', issuer: 'https://mcp.linear.app' },
+  github: { label: 'GitHub pull requests (read-only)', name: 'github', url: 'https://api.githubcopilot.com/mcp/x/pull_requests/readonly', issuer: 'https://github.com/login/oauth' },
+};
+
+function addConnectionForm(publicOrigin: string, presetId: string | null): string {
   const callback = new URL('/oauth/callback', publicOrigin).href;
-  return `<form class="panel" method="post" action="/connections">
+  const preset = presetId === null ? undefined : presets[presetId];
+  const value = (text: string | undefined) => text ? ` value="${esc(text)}"` : '';
+  const links = Object.entries(presets).map(([id, { label }]) => `<a href="/?connect=${id}#add-connection">${esc(label)}</a>`).join(' · ');
+  return `<form id="add-connection" class="panel" method="post" action="/connections">
 <h3>Add connection</h3>
-<label>Connection name<input name="name" maxlength="80" required></label>
-<label>MCP endpoint<input name="url" type="url" maxlength="2048" required></label>
-<label>Authentication<select name="auth"><option value="bearer">Bearer token</option><option value="oauth">Browser sign-in (OAuth)</option></select></label>
+<p><small>Start from: ${links}</small></p>
+${preset?.name === 'github' ? '<p><small>GitHub needs a GitHub App registered for OAuth. Enter its client ID and secret under Optional OAuth settings.</small></p>' : ''}
+<label>Connection name<input name="name" maxlength="80" required${value(preset?.name)}></label>
+<label>MCP endpoint<input name="url" type="url" maxlength="2048" required${value(preset?.url)}></label>
+<label>Authentication<select name="auth"><option value="bearer">Bearer token</option><option value="oauth"${preset ? ' selected' : ''}>Browser sign-in (OAuth)</option></select></label>
 <label>Bearer token <small>For token authentication</small><input type="password" name="token" autocomplete="off" maxlength="8192"></label>
-<label>OAuth issuer URL <small>For browser sign-in</small><input name="issuer" type="url" maxlength="2048"></label>
+<label>OAuth issuer URL <small>For browser sign-in</small><input name="issuer" type="url" maxlength="2048"${value(preset?.issuer)}></label>
 <details class="stack"><summary>Optional OAuth settings</summary>
 <p class="hint">If your provider asks you to register an app, use this callback URL in its settings.</p>
 <pre><code>${esc(callback)}</code></pre>
@@ -280,7 +294,7 @@ function statusLabel(status: string): string {
   return esc(spaced.charAt(0).toUpperCase() + spaced.slice(1));
 }
 
-function dashboard(res: ServerResponse, app: WebApp) {
+function dashboard(res: ServerResponse, app: WebApp, preset: string | null) {
   const connections = app.listConnections();
   const requests = app.listRequests();
   const agents = app.listAgents();
@@ -296,14 +310,23 @@ function dashboard(res: ServerResponse, app: WebApp) {
   const secrets = `<section id="secrets"><h2>Sandbox secrets</h2><div class="panel">
 <p><small>${app.sandboxEnabled
     ? 'An approved command receives the secrets it names as environment variables.'
-    : 'The sandbox is off. Set SANI_SANDBOX_IMAGE to let agents request commands.'}</small></p>${secretRows}
+    : 'The sandbox is off. Run “npx github:sianachi/sani sandbox” on the Sani host (it needs Docker) and restart to let agents request commands.'}</small></p>${secretRows}
 <form method="post" action="/secrets"><label>Name <small>For example GH_TOKEN</small><input name="name" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
 <label>Value<input type="password" name="value" autocomplete="off" maxlength="8192" required></label>
 <button class="primary">Save secret</button></form></div></section>`;
 
-  render(res, 200, 'Operator console', `<h1>Operator console</h1>
+  const step = (done: boolean, text: string) => `<li>${done ? '<strong>Done.</strong> ' : ''}${text}</li>`;
+  const hasSecrets = app.listSecrets().length > 0;
+  const started = (connections.length > 0 || hasSecrets) && agents.length > 0 && requests.length > 0
+    ? '' : `<section class="panel start"><h2>Get started</h2><ol>
+${step(connections.length > 0 || hasSecrets, 'Give Sani something to guard: <a href="#add-connection">add a connection</a> to an MCP server, or <a href="#secrets">save a secret</a> for sandbox commands.')}
+${step(agents.length > 0, '<a href="#agents">Create an agent token</a>. Sani then shows the command that connects your agent.')}
+${step(requests.length > 0, 'Ask your agent to use Sani. Its requests appear under <a href="#requests">Requests</a> for you to approve.')}
+</ol></section>`;
+
+  render(res, 200, 'Operator console', `<h1>Operator console</h1>${started}
 <div class="grid"><div><section id="connections" class="stack"><h2>Connections</h2>
-${connectionRows}${addConnectionForm(app.publicOrigin)}</section></div>
+${connectionRows}${addConnectionForm(app.publicOrigin, preset)}</section></div>
 <div><section id="requests"><h2>Requests</h2><div class="panel">${requestRows || '<p>Requests from your agents appear here.</p>'}</div></section>
 <section id="agents"><h2>Agents</h2><div class="panel">${agentRows}
 <form method="post" action="/agents"><label>Agent name<input name="name" maxlength="80" required></label>
@@ -394,7 +417,7 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
         return;
       }
       if (path === '/') {
-        dashboard(res, app);
+        dashboard(res, app, url.searchParams.get('connect'));
         return;
       }
       const request = /^\/requests\/([\w-]+)$/.exec(path);
@@ -480,9 +503,19 @@ export async function handleWeb(req: IncomingMessage, res: ServerResponse, url: 
       }
       if (path === '/agents') {
         const agent = app.createAgent(field(fields, 'name', 80));
+        const endpoint = new URL('/mcp', app.publicOrigin).href;
         render(res, 200, 'Agent token', `<div class="narrow stack"><h1>Agent token</h1>
-<p>Copy this token into your agent’s MCP connection settings. This page displays it once.</p>
-<pre><code>${esc(agent.token)}</code></pre><p><a href="/#agents">Return to agents</a></p></div>`, true);
+<p>This page displays the token once. Copy what you need before leaving.</p>
+<section class="panel stack"><div><h2>Claude Code</h2><p>Run this in a terminal, then start a new session.</p>
+${commandView(`claude mcp add --transport http sani ${endpoint} --header "Authorization: Bearer ${agent.token}"`)}</div>
+<div><h2>Codex</h2><p>Add this to <code>~/.codex/config.toml</code>, and set the variable where Codex starts.</p>
+${commandView(`[mcp_servers.sani]\nurl = "${endpoint}"\nbearer_token_env_var = "SANI_AGENT_KEY"`, 'config.toml')}
+${commandView(`export SANI_AGENT_KEY=${agent.token}`)}</div>
+<div><h2>Any other MCP client</h2><p>Add a Streamable HTTP server with this URL and header.</p>
+${commandView(`URL:    ${endpoint}\nHeader: Authorization: Bearer ${agent.token}`, 'settings')}</div>
+<div><h2>Token only</h2>${commandView(agent.token, 'token')}</div>
+<p><small>Sani tells a connected agent how to use it. Clients that ignore server instructions can load the <code>skills/use-sani</code> skill from the Sani repository.</small></p></section>
+<p><a href="/#agents">Return to agents</a></p></div>`, true);
         return;
       }
       if (path === '/secrets') {

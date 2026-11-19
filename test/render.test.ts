@@ -43,7 +43,7 @@ test('the command view shows every line exactly and copies the original text', (
   const html = commandView(command);
   assert.match(html, /sh · 2 lines/);
   assert.match(html, /<span class="l">A=&quot;x &lt;y&gt;&quot;<\/span><span class="l">curl -s &quot;\$A&quot; \| jq \.<\/span><\/code>/);
-  assert.match(html, /aria-label="Copy command"/);
+  assert.match(html, /aria-label="Copy"/);
   assert(html.includes(`<textarea hidden readonly>A=&quot;x &lt;y&gt;&quot;\ncurl -s &quot;$A&quot; | jq .\n</textarea>`));
   assert.match(commandView('ls'), /sh · 1 line</);
 });

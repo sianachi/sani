@@ -1,16 +1,33 @@
 {
   "name": "sani-mcp",
-  "version": "1.0.0-rc.4",
-  "private": true,
+  "version": "1.0.0-rc.5",
+  "description": "Self-hosted broker that lets AI coding agents use authenticated MCP servers and run credentialed shell commands in a Docker sandbox, with per-request human approval",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sianachi/sani.git"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "secrets",
+    "sandbox",
+    "approval"
+  ],
+  "bin": {
+    "sani-mcp": "dist/index.js"
+  },
   "engines": {
     "node": ">=24.13.0"
   },
   "scripts": {
     "start": "node src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "check": "tsc",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "sandbox:build": "node src/index.ts sandbox"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -24,10 +41,10 @@
     "typescript": "^5.9"
   },
   "files": [
-    "src",
+    "dist",
     "skills",
+    "sandbox",
     "README.md",
-    "LICENSE",
-    "Dockerfile"
+    "LICENSE"
   ]
 }

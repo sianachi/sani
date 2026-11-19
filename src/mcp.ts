@@ -3,7 +3,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import manifest from '../package.json' with { type: 'json' };
+import { readFileSync } from 'node:fs';
+
+// Read at start so the same files serve the source tree and the compiled package.
+const fromRoot = (path: string) => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+const version = String(JSON.parse(fromRoot('package.json')).version);
+// Clients show these instructions to the model, so agents need no separately installed skill.
+const instructions = fromRoot('skills/use-sani/SKILL.md').replace(/^---[\s\S]*?---\s*/, '');
 
 export interface McpApp {
   publicOrigin?: string;
@@ -40,7 +46,7 @@ function toolReply(read: () => Record<string, unknown> | undefined, failure: str
 }
 
 function serverFor(app: McpApp, agentId: string): McpServer {
-  const server = new McpServer({ name: 'sani', version: manifest.version });
+  const server = new McpServer({ name: 'sani', version }, { instructions });
   server.registerTool('list_actions', {
     description: 'List enabled actions and their argument schemas on connected platforms.',
     annotations: { readOnlyHint: true },
